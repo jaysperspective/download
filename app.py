@@ -715,7 +715,7 @@ function renderLibrary() {
       const dlBtn = document.createElement('button');
       dlBtn.className = 'hist-btn';
       dlBtn.textContent = 'Download';
-      dlBtn.onclick = e => { e.stopPropagation(); window.location.href = '/file/' + item.job_id; };
+      dlBtn.onclick = e => { e.stopPropagation(); window.location.href = '/file/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
       btns.appendChild(dlBtn);
     }
     if (activeLibTab === 'albums' && item.job_id) {
@@ -1252,7 +1252,7 @@ function buildHistoryList(items) {
         const dlBtn = document.createElement('button');
         dlBtn.className = 'hist-btn';
         dlBtn.textContent = 'Download';
-        dlBtn.onclick = () => { window.location.href = '/file/' + item.job_id; };
+        dlBtn.onclick = () => { window.location.href = '/file/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
         right.appendChild(dlBtn);
       }
     }
