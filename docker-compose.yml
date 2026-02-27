@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - downloads:/data
+    environment:
+      - YT_UI_TOKEN=${YT_UI_TOKEN}        # comma-separated: alice_abc,bob_xyz
+      - YT_UI_FILE_TTL_DAYS=7
+      - FLASK_HOST=0.0.0.0
+    ports:
+      - "5055:5055"
+
+volumes:
+  downloads:

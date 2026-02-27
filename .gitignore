@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Build artifacts
+bin/
+dist/
+build/
++downloads.zip
+*.zip
+.build-venv/
+icon.iconset/
+
+# Runtime data (local only)
+history.json
+jobs.json
+job-logs/
+
+# OS / editor
+.DS_Store
+.claude/
+
+# Secrets
+.env
