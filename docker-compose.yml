@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     volumes:
       - downloads:/data
-      - /home/jh/cookies.txt:/cookies.txt:ro
+      - /home/jh/cookies.txt:/cookies.txt
     environment:
       - YT_UI_TOKEN=${YT_UI_TOKEN}        # comma-separated: alice_abc,bob_xyz
       - YT_UI_FILE_TTL_DAYS=7
