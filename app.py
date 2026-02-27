@@ -415,6 +415,11 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1a1818">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="+downloads">
+  <link rel="manifest" href="/static/manifest.json">
   <title>+downloads</title>
   <link rel="icon" type="image/png" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -1427,6 +1432,9 @@ async function fetchLibrary() {
   if (!res.ok) return;
   const data = await res.json();
   categorizeLibrary(data.items);
+  try {
+    localStorage.setItem('yt_lib_cache', JSON.stringify({ts: Date.now(), data: libData}));
+  } catch(e) {}
   renderLibrary();
   renderBurnTrackList();
   updateBurnFooter();
@@ -1742,6 +1750,15 @@ if (!IS_LOCAL) {
 }
 
 fetchHistory();
+try {
+  const cached = JSON.parse(localStorage.getItem('yt_lib_cache') || 'null');
+  if (cached && cached.data) {
+    libData = cached.data;
+    renderLibrary();
+    renderBurnTrackList();
+    updateBurnFooter();
+  }
+} catch(e) {}
 fetchLibrary();
 checkBurner();
 </script>
