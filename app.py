@@ -504,15 +504,19 @@ HTML = """
 
     <!-- Download full version -->
     <a href="http://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer"
-       style="display:flex; align-items:center; gap:14px; margin-top:16px; padding:16px 18px;
+       style="display:flex; flex-direction:column; align-items:center; justify-content:center;
+              gap:10px; margin-top:16px; padding:28px 18px;
               background:#1a1a1a; border:1px solid #2a2a2a; border-radius:12px;
               text-decoration:none; cursor:pointer; transition:border-color 0.15s;"
        onmouseover="this.style.borderColor='#e03c8a'" onmouseout="this.style.borderColor='#2a2a2a'">
-      <svg width="38" height="38" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg width="72" height="72" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M3 7C3 5.9 3.9 5 5 5H10L12 7H19C20.1 7 21 7.9 21 9V17C21 18.1 20.1 19 19 19H5C3.9 19 3 18.1 3 17V7Z" fill="#e03c8a"/>
         <path d="M12 10V15M12 15L9.5 12.5M12 15L14.5 12.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span style="font-size:14px; font-weight:600; color:#f0f0f0;">+downloads full version</span>
+      <div style="text-align:center; line-height:1.4;">
+        <div style="font-size:15px; font-weight:700; color:#f0f0f0;">+downloads</div>
+        <div style="font-size:13px; font-weight:400; color:#aaa;">full version</div>
+      </div>
     </a>
 
     <!-- Burn a CD card -->
