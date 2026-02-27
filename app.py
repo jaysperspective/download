@@ -95,119 +95,314 @@ ADMIN_HTML = """
       background: #1a1818;
       color: #f0eef0;
       min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
+      padding: 32px 16px 64px;
+    }
+    .wrap { max-width: 860px; margin: 0 auto; }
+    h1 {
+      font-size: 22px; font-weight: 800; color: #db52a6;
+      letter-spacing: -0.5px; margin-bottom: 24px;
     }
     .card {
-      background: #242222;
-      border: 1px solid #2e2c2c;
-      border-radius: 16px;
-      padding: 32px 36px;
-      width: 100%;
-      max-width: 420px;
+      background: #242222; border: 1px solid #2e2c2c;
+      border-radius: 16px; padding: 24px 28px; margin-bottom: 20px;
     }
-    h1 {
-      font-size: 20px;
-      font-weight: 800;
-      color: #db52a6;
-      margin-bottom: 24px;
-      letter-spacing: -0.5px;
+    .card-title {
+      font-size: 12px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #666; margin-bottom: 16px;
     }
     label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: #888;
-      margin-bottom: 6px;
-      margin-top: 16px;
+      display: block; font-size: 13px; font-weight: 600;
+      color: #888; margin-bottom: 6px; margin-top: 14px;
     }
     label:first-of-type { margin-top: 0; }
     input[type=password], input[type=file] {
-      width: 100%;
-      background: #1a1818;
-      border: 1.5px solid #353333;
-      color: #f0eef0;
-      padding: 12px 14px;
-      border-radius: 10px;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s;
+      width: 100%; background: #1a1818; border: 1.5px solid #353333;
+      color: #f0eef0; padding: 11px 14px; border-radius: 10px;
+      font-size: 14px; outline: none; transition: border-color 0.2s;
     }
     input[type=password]:focus { border-color: #db52a6; }
     input[type=file] { cursor: pointer; }
     input::placeholder { color: #464444; }
-    button {
-      margin-top: 22px;
-      width: 100%;
-      background: #db52a6;
-      color: #fff;
-      border: none;
-      padding: 13px;
-      border-radius: 10px;
-      font-size: 15px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: background 0.15s, transform 0.1s;
+    .btn-row { display: flex; gap: 10px; margin-top: 18px; }
+    .btn {
+      flex: 1; background: #db52a6; color: #fff; border: none;
+      padding: 12px; border-radius: 10px; font-size: 14px; font-weight: 700;
+      cursor: pointer; transition: background 0.15s, transform 0.1s;
     }
-    button:hover { background: #c9479a; }
-    button:active { transform: scale(0.97); }
-    #status {
-      margin-top: 16px;
-      font-size: 14px;
-      font-weight: 600;
-      min-height: 20px;
-      text-align: center;
+    .btn:hover { background: #c9479a; }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+    .btn-outline {
+      flex: 1; background: #1a1818; color: #db52a6;
+      border: 1.5px solid #db52a6; padding: 12px; border-radius: 10px;
+      font-size: 14px; font-weight: 700; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-outline:hover { background: rgba(219,82,166,0.08); }
+    #upload-msg {
+      margin-top: 12px; font-size: 13px; font-weight: 600;
+      min-height: 18px; text-align: center;
     }
     .ok  { color: #4caf7d; }
     .err { color: #e05c5c; }
+
+    /* Summary cards */
+    .stat-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-card {
+      background: #242222; border: 1px solid #2e2c2c;
+      border-radius: 14px; padding: 18px 20px;
+    }
+    .stat-label { font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.07em; color: #555; margin-bottom: 6px; }
+    .stat-val { font-size: 32px; font-weight: 800; line-height: 1; }
+    .stat-sub { font-size: 12px; color: #666; margin-top: 4px; }
+    .c-pink  { color: #db52a6; }
+    .c-green { color: #4caf7d; }
+    .c-red   { color: #e05c5c; }
+    .c-blue  { color: #5b9cf6; }
+
+    /* Type breakdown */
+    .type-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .type-pill {
+      display: flex; align-items: center; gap: 8px;
+      background: #1a1818; border: 1px solid #2e2c2c;
+      border-radius: 99px; padding: 7px 14px; font-size: 13px; font-weight: 600;
+    }
+    .type-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .type-count { color: #888; font-size: 12px; margin-left: 2px; }
+
+    /* Table */
+    .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .tbl th {
+      text-align: left; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.07em;
+      color: #555; padding: 0 10px 10px 0; border-bottom: 1px solid #2e2c2c;
+    }
+    .tbl td {
+      padding: 10px 10px 10px 0; border-bottom: 1px solid #222;
+      vertical-align: middle;
+    }
+    .tbl tr:last-child td { border-bottom: none; }
+    .tbl tr:hover td { background: rgba(255,255,255,0.02); }
+    .badge {
+      display: inline-block; padding: 3px 9px; border-radius: 99px;
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; white-space: nowrap;
+    }
+    .badge-done     { background: rgba(76,175,125,0.15); color: #4caf7d; }
+    .badge-error    { background: rgba(224,92,92,0.15);  color: #e05c5c; }
+    .badge-cancelled{ background: rgba(100,100,100,0.15);color: #777; }
+    .badge-running  { background: rgba(91,156,246,0.15); color: #5b9cf6; }
+    .badge-queued   { background: rgba(255,200,80,0.15); color: #f0b429; }
+    .url-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; color: #aaa; font-size: 12px; }
+    .time-cell { color: #555; font-size: 12px; white-space: nowrap; }
+    #stats-section { display: none; }
+    .refresh-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+    .refresh-btn {
+      background: none; border: 1px solid #353333; color: #666;
+      padding: 6px 14px; border-radius: 8px; font-size: 12px;
+      cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    }
+    .refresh-btn:hover { color: #f0eef0; border-color: #555; }
+    @media (max-width: 600px) {
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .url-cell { max-width: 140px; }
+    }
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="wrap">
     <h1>+downloads admin</h1>
-    <label for="pw">Password</label>
-    <input type="password" id="pw" placeholder="YT_UI_COOKIES_PASSWORD">
-    <label for="file">cookies.txt</label>
-    <input type="file" id="file" accept=".txt">
-    <button id="btn" onclick="upload()">Upload</button>
-    <div id="status"></div>
+
+    <div class="card">
+      <div class="card-title">Upload Cookies</div>
+      <label for="pw">Password</label>
+      <input type="password" id="pw" placeholder="YT_UI_COOKIES_PASSWORD">
+      <label for="cfile">cookies.txt</label>
+      <input type="file" id="cfile" accept=".txt">
+      <div class="btn-row">
+        <button class="btn" id="upload-btn" onclick="uploadCookies()">Upload</button>
+        <button class="btn-outline" onclick="loadStats()">Load Stats</button>
+      </div>
+      <div id="upload-msg"></div>
+    </div>
+
+    <div id="stats-section">
+      <div class="refresh-row">
+        <button class="refresh-btn" onclick="loadStats()">&#8635; Refresh</button>
+      </div>
+
+      <div class="stat-grid" id="stat-grid"></div>
+
+      <div class="card">
+        <div class="card-title">Downloads by Type</div>
+        <div class="type-row" id="type-row"></div>
+      </div>
+
+      <div class="card" id="active-card" style="display:none">
+        <div class="card-title">Active Jobs</div>
+        <table class="tbl" id="active-tbl">
+          <thead><tr>
+            <th>Type</th><th>URL</th><th>Progress</th><th>Status</th>
+          </tr></thead>
+          <tbody id="active-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Recent Downloads <span id="recent-count" style="color:#555;font-weight:400;font-size:11px;margin-left:6px"></span></div>
+        <table class="tbl" id="recent-tbl">
+          <thead><tr>
+            <th>Time</th><th>Type</th><th>URL</th><th>Status</th>
+          </tr></thead>
+          <tbody id="recent-body"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
+
   <script>
-    async function upload() {
-      const pw   = document.getElementById('pw').value;
-      const file = document.getElementById('file').files[0];
-      const st   = document.getElementById('status');
-      const btn  = document.getElementById('btn');
-      st.textContent = '';
-      st.className = '';
-      if (!pw)   { st.textContent = 'Password required.';   st.className = 'err'; return; }
-      if (!file) { st.textContent = 'Select a file first.'; st.className = 'err'; return; }
-      btn.disabled = true;
-      btn.textContent = 'Uploading…';
+    const TYPE_COLORS = {
+      video: '#db52a6', audio: '#4caf7d', soundcloud: '#ff5500',
+      spotify: '#1db954', apple_music: '#fc3c44'
+    };
+
+    function pw() { return document.getElementById('pw').value; }
+
+    function relTime(iso) {
+      if (!iso) return '—';
+      const diff = Math.floor((Date.now() - new Date(iso + (iso.endsWith('Z') ? '' : 'Z'))) / 1000);
+      if (diff < 60)   return diff + 's ago';
+      if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+      if (diff < 86400)return Math.floor(diff/3600) + 'h ago';
+      return Math.floor(diff/86400) + 'd ago';
+    }
+
+    function statusBadge(s) {
+      const cls = {done:'badge-done',error:'badge-error',cancelled:'badge-cancelled',
+                   running:'badge-running',queued:'badge-queued'}[s] || 'badge-cancelled';
+      return '<span class="badge ' + cls + '">' + s + '</span>';
+    }
+
+    function typePill(t, count) {
+      const color = TYPE_COLORS[t] || '#888';
+      return '<div class="type-pill">'
+        + '<span class="type-dot" style="background:' + color + '"></span>'
+        + '<span>' + t + '</span>'
+        + '<span class="type-count">' + count + '</span>'
+        + '</div>';
+    }
+
+    async function uploadCookies() {
+      const file = document.getElementById('cfile').files[0];
+      const msg  = document.getElementById('upload-msg');
+      const btn  = document.getElementById('upload-btn');
+      msg.textContent = ''; msg.className = '';
+      if (!pw())   { msg.textContent = 'Password required.';   msg.className = 'err'; return; }
+      if (!file)   { msg.textContent = 'Select a file first.'; msg.className = 'err'; return; }
+      btn.disabled = true; btn.textContent = 'Uploading…';
       try {
         const fd = new FormData();
-        fd.append('password', pw);
+        fd.append('password', pw());
         fd.append('cookies', file);
         const r = await fetch('/upload-cookies', { method: 'POST', body: fd });
         const j = await r.json();
         if (r.ok) {
-          st.textContent = 'Uploaded successfully.';
-          st.className = 'ok';
-          document.getElementById('pw').value = '';
-          document.getElementById('file').value = '';
+          msg.textContent = 'Uploaded successfully.'; msg.className = 'ok';
+          document.getElementById('cfile').value = '';
         } else {
-          st.textContent = j.error || 'Upload failed.';
-          st.className = 'err';
+          msg.textContent = j.error || 'Upload failed.'; msg.className = 'err';
         }
-      } catch (e) {
-        st.textContent = 'Network error.';
-        st.className = 'err';
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Upload';
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+      finally { btn.disabled = false; btn.textContent = 'Upload'; }
+    }
+
+    async function loadStats() {
+      const msg = document.getElementById('upload-msg');
+      if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
+      msg.textContent = 'Loading…'; msg.className = '';
+      try {
+        const r = await fetch('/admin/stats', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({password: pw()})
+        });
+        const d = await r.json();
+        if (!r.ok) { msg.textContent = d.error || 'Error loading stats.'; msg.className = 'err'; return; }
+        msg.textContent = ''; renderStats(d);
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+    }
+
+    function renderStats(d) {
+      document.getElementById('stats-section').style.display = 'block';
+
+      // Summary cards
+      const total    = d.total_history;
+      const done     = (d.by_status.done || 0);
+      const errors   = (d.by_status.error || 0);
+      const succRate = total ? Math.round(done / total * 100) : 0;
+      document.getElementById('stat-grid').innerHTML =
+        '<div class="stat-card"><div class="stat-label">Total Downloads</div>'
+          +'<div class="stat-val c-pink">'+total+'</div>'
+          +'<div class="stat-sub">all time (last 500)</div></div>'
+        +'<div class="stat-card"><div class="stat-label">Successful</div>'
+          +'<div class="stat-val c-green">'+done+'</div>'
+          +'<div class="stat-sub">'+succRate+'% success rate</div></div>'
+        +'<div class="stat-card"><div class="stat-label">Errors</div>'
+          +'<div class="stat-val c-red">'+errors+'</div>'
+          +'<div class="stat-sub">'+(d.by_status.cancelled||0)+' cancelled</div></div>'
+        +'<div class="stat-card"><div class="stat-label">Running Now</div>'
+          +'<div class="stat-val c-blue">'+d.running+'</div>'
+          +'<div class="stat-sub">'+d.queue_length+' queued &middot; v'+d.version+'</div></div>';
+
+      // Type pills
+      const typeHtml = Object.entries(d.by_type)
+        .sort((a,b) => b[1]-a[1])
+        .map(([t,c]) => typePill(t, c)).join('');
+      document.getElementById('type-row').innerHTML = typeHtml || '<span style="color:#555">No data</span>';
+
+      // Active jobs
+      const activeCard = document.getElementById('active-card');
+      if (d.active_jobs && d.active_jobs.length) {
+        activeCard.style.display = '';
+        document.getElementById('active-body').innerHTML = d.active_jobs.map(j =>
+          '<tr>'
+          +'<td><span class="badge" style="background:rgba(219,82,166,0.15);color:'+
+              (TYPE_COLORS[j.type]||'#888')+'">'+j.type+'</span></td>'
+          +'<td class="url-cell" title="'+escHtml(j.url||'')+'">'+escHtml(truncUrl(j.url))+'</td>'
+          +'<td style="color:#5b9cf6;font-weight:700">'+(j.progress_pct||0)+'%</td>'
+          +'<td>'+statusBadge(j.status)+'</td>'
+          +'</tr>'
+        ).join('');
+      } else {
+        activeCard.style.display = 'none';
       }
+
+      // Recent table
+      document.getElementById('recent-count').textContent =
+        '(' + d.recent.length + ' shown)';
+      document.getElementById('recent-body').innerHTML = d.recent.map(item =>
+        '<tr>'
+        +'<td class="time-cell">'+relTime(item.timestamp)+'</td>'
+        +'<td><span class="badge" style="background:rgba(219,82,166,0.12);color:'
+            +(TYPE_COLORS[item.type]||'#888')+'">'+escHtml(item.type||'?')+'</span></td>'
+        +'<td class="url-cell" title="'+escHtml(item.url||'')+'">'+escHtml(truncUrl(item.url))+'</td>'
+        +'<td>'+statusBadge(item.final_status||'unknown')+'</td>'
+        +'</tr>'
+      ).join('') || '<tr><td colspan="4" style="color:#555;padding:16px 0">No history yet</td></tr>';
+    }
+
+    function truncUrl(url) {
+      if (!url) return '—';
+      try { url = decodeURIComponent(url); } catch(e) {}
+      return url.length > 60 ? url.slice(0, 57) + '…' : url;
+    }
+    function escHtml(s) {
+      return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
   </script>
 </body>
@@ -2750,6 +2945,49 @@ def upload_cookies():
         return jsonify({"error": "No file provided"}), 400
     f.save(COOKIES_PATH)
     return jsonify({"ok": True})
+
+
+@app.post("/admin/stats")
+def admin_stats():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    data = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    history = load_history()
+    by_status: dict = {}
+    by_type: dict = {}
+    for item in history:
+        s = item.get("final_status", "unknown")
+        t = item.get("type", "unknown")
+        by_status[s] = by_status.get(s, 0) + 1
+        by_type[t] = by_type.get(t, 0) + 1
+    with jobs_lock:
+        running = sum(1 for j in jobs.values() if j.get("status") == "running")
+        active_jobs = [
+            {
+                "job_id": jid,
+                "status": j.get("status"),
+                "type": j.get("type"),
+                "url": j.get("url"),
+                "progress_pct": j.get("progress_pct", 0),
+                "created_at": str(j.get("created_at", "")),
+            }
+            for jid, j in jobs.items()
+            if j.get("status") in ("running", "queued")
+        ]
+    with queue_cv:
+        qlen = len(job_queue)
+    return jsonify({
+        "version": VERSION,
+        "running": running,
+        "queue_length": qlen,
+        "total_history": len(history),
+        "by_status": by_status,
+        "by_type": by_type,
+        "recent": history[-50:][::-1],
+        "active_jobs": active_jobs,
+    })
 
 
 @app.after_request
