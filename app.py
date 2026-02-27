@@ -611,10 +611,43 @@ HTML = """
     </div>
   </div>
 
+  <!-- Token gate modal -->
+  <div id="tokenModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:#1a1a1a; border:1px solid #333; border-radius:14px; padding:32px 28px; width:340px; max-width:90vw; box-shadow:0 8px 40px rgba(0,0,0,0.6);">
+      <h2 style="margin:0 0 8px; font-size:18px; color:#f0f0f0;">Enter your token</h2>
+      <p style="margin:0 0 20px; font-size:13px; color:#888;">A token is required to use this app.</p>
+      <input id="tokenModalInput" type="text" placeholder="Token" autocomplete="off"
+        style="width:100%; box-sizing:border-box; background:#111; border:1px solid #444; border-radius:8px; padding:10px 12px; color:#f0f0f0; font-size:14px; outline:none; margin-bottom:14px;"
+        onkeydown="if(event.key==='Enter') submitTokenModal();" />
+      <button onclick="submitTokenModal()"
+        style="width:100%; padding:11px; background:#e03c8a; border:none; border-radius:8px; color:#fff; font-size:15px; font-weight:600; cursor:pointer;">
+        Submit
+      </button>
+    </div>
+  </div>
+
 <script>
 const IS_LOCAL = {{ 'true' if is_local else 'false' }};
 let currentJob = null;
 let savedToken = sessionStorage.getItem("yt_token") || "";
+
+function showTokenModal() {
+  const m = document.getElementById('tokenModal');
+  m.style.display = 'flex';
+  document.getElementById('tokenModalInput').focus();
+}
+function hideTokenModal() {
+  document.getElementById('tokenModal').style.display = 'none';
+}
+function submitTokenModal() {
+  const val = document.getElementById('tokenModalInput').value.trim();
+  if (!val) return;
+  savedToken = val;
+  sessionStorage.setItem("yt_token", savedToken);
+  document.getElementById('token').value = savedToken;
+  hideTokenModal();
+}
+if (!IS_LOCAL && !savedToken) showTokenModal();
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -1023,6 +1056,7 @@ document.getElementById('type').addEventListener('change', syncScOptions);
 syncScOptions();
 
 async function start() {
+  if (!IS_LOCAL && !savedToken) { showTokenModal(); return; }
   const url = document.getElementById('url').value.trim();
   if (!url) return;
   if (url.includes('open.spotify.com') || url.includes('spotify.com/')) {
