@@ -1714,6 +1714,7 @@ def run_job(job_id: str):
         cmd = [
             YT_DLP_BIN,
             "--ffmpeg-location", FFMPEG_BIN,
+            "--js-runtimes", "node",
             "-f", "bestaudio",
             "--extract-audio",
             "--audio-format", "mp3",
@@ -1755,6 +1756,7 @@ def run_job(job_id: str):
         cmd = [
             YT_DLP_BIN,
             "--ffmpeg-location", FFMPEG_BIN,
+            "--js-runtimes", "node",
             "-f", "bv*+ba/b",
             "--merge-output-format", "mp4",
             "--print", "after_move:filepath",
@@ -1806,6 +1808,7 @@ def run_job(job_id: str):
                 track_cmd = [
                     YT_DLP_BIN,
                     "--ffmpeg-location", FFMPEG_BIN,
+                    "--js-runtimes", "node",
                     f"ytsearch1:{artist} - {title}",
                     "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
                     "--add-metadata",
@@ -1916,6 +1919,7 @@ def run_job(job_id: str):
                 track_cmd = [
                     YT_DLP_BIN,
                     "--ffmpeg-location", FFMPEG_BIN,
+                    "--js-runtimes", "node",
                     f"ytsearch1:{artist} - {title}",
                     "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
                     "--add-metadata",
