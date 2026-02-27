@@ -722,7 +722,7 @@ function renderLibrary() {
       const zipBtn = document.createElement('button');
       zipBtn.className = 'hist-btn';
       zipBtn.textContent = 'ZIP';
-      zipBtn.onclick = e => { e.stopPropagation(); window.location.href = '/download/' + item.job_id; };
+      zipBtn.onclick = e => { e.stopPropagation(); window.location.href = '/download/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
       btns.appendChild(zipBtn);
     }
     row.onclick = () => reveal(revealPath);
@@ -1071,19 +1071,19 @@ async function poll() {
     const n = (data.output_paths || []).length;
     let meta = done + '/' + tot + ' tracks';
     if (data.status === 'done' && n > 0) {
-      meta += ' \u2014 <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>';
+      meta += ' \u2014 <a href="/download/' + currentJob + (savedToken ? '?token=' + encodeURIComponent(savedToken) : '') + '" target="_blank">Download ZIP</a>';
     }
     meta += ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View log</a>';
     document.getElementById('meta').innerHTML = meta;
   } else if (data.output_paths && data.output_paths.length > 1) {
     const n = data.output_paths.length;
     document.getElementById('meta').innerHTML =
-      n + ' files \u2014 <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>'
+      n + ' files \u2014 <a href="/download/' + currentJob + (savedToken ? '?token=' + encodeURIComponent(savedToken) : '') + '" target="_blank">Download ZIP</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   } else if (data.file || data.output_path) {
     const name = data.file || data.output_path.split('/').pop();
     document.getElementById('meta').innerHTML =
-      'File: <a href="/download/' + currentJob + '" target="_blank">' + escHtml(name) + '</a>'
+      'File: <a href="/download/' + currentJob + (savedToken ? '?token=' + encodeURIComponent(savedToken) : '') + '" target="_blank">' + escHtml(name) + '</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   }
   if (data.status === "done") {
@@ -1237,7 +1237,7 @@ function buildHistoryList(items) {
         const zipBtn = document.createElement('button');
         zipBtn.className = 'hist-btn';
         zipBtn.textContent = 'ZIP';
-        zipBtn.onclick = () => { window.location.href = '/download/' + item.job_id; };
+        zipBtn.onclick = () => { window.location.href = '/download/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
         right.appendChild(zipBtn);
       }
     } else {
@@ -1329,8 +1329,12 @@ def require_auth():
         return
     header = request.headers.get("Authorization", "")
     scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or token not in VALID_TOKENS:
-        abort(401)
+    if scheme.lower() == "bearer" and token in VALID_TOKENS:
+        return
+    qs_token = request.args.get("token", "")
+    if qs_token in VALID_TOKENS:
+        return
+    abort(401)
 
 def is_valid_url(url: str) -> bool:
     if not url:
