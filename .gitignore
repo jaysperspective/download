@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 
-# Build artifacts
+# Build artifacts (desktop only — not used in web version)
 bin/
 dist/
 build/
@@ -11,6 +11,9 @@ build/
 *.zip
 .build-venv/
 icon.iconset/
+icon.icns
+build.sh
+downloads.spec
 
 # Runtime data (local only)
 history.json
