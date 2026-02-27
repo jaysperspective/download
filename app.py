@@ -1059,10 +1059,11 @@ let activeLibTab = 'albums';
 function categorizeLibrary(items) {
   const albums = [], songs = [], videos = [];
   (items || []).filter(i => i.final_status === 'done').forEach(item => {
+    const titleStr = typeof item.title === 'string' ? item.title.trim() : '';
     if (item.type === 'video') {
       const path = item.output_path || (item.output_paths && item.output_paths[0]) || '';
-      const filename = path.split('/').pop() || item.title || 'Unknown';
-      videos.push({ ...item, videoName: item.title || filename.replace(/\.[^.]+$/, '') });
+      const stem = (path.split('/').pop() || '').replace(/\.[^.]+$/, '').trim();
+      videos.push({ ...item, videoName: titleStr || stem || 'Unknown' });
       return;
     }
     const multi = item.output_paths && item.output_paths.length > 1;
@@ -1072,8 +1073,8 @@ function categorizeLibrary(items) {
       albums.push({ ...item, albumName: folder });
     } else {
       const path = item.output_path || (item.output_paths && item.output_paths[0]) || '';
-      const filename = path.split('/').pop() || item.title || 'Unknown';
-      songs.push({ ...item, songName: item.title || filename });
+      const stem = (path.split('/').pop() || '').replace(/\.[^.]+$/, '').trim();
+      songs.push({ ...item, songName: titleStr || stem || 'Unknown' });
     }
   });
   libData = { albums, songs, videos };
@@ -1116,7 +1117,7 @@ function renderLibrary() {
     info.className = 'lib-info';
     const name = document.createElement('div');
     name.className = 'lib-name';
-    name.textContent = getName(item);
+    name.textContent = getName(item) || 'Unknown';
     const meta = document.createElement('div');
     meta.className = 'lib-meta';
     const tag = document.createElement('span');
@@ -1433,7 +1434,7 @@ async function fetchLibrary() {
   const data = await res.json();
   categorizeLibrary(data.items);
   try {
-    localStorage.setItem('yt_lib_cache', JSON.stringify({ts: Date.now(), data: libData}));
+    localStorage.setItem('yt_lib_cache', JSON.stringify({ts: Date.now(), items: data.items}));
   } catch(e) {}
   renderLibrary();
   renderBurnTrackList();
@@ -1752,8 +1753,8 @@ if (!IS_LOCAL) {
 fetchHistory();
 try {
   const cached = JSON.parse(localStorage.getItem('yt_lib_cache') || 'null');
-  if (cached && cached.data) {
-    libData = cached.data;
+  if (cached && cached.items) {
+    categorizeLibrary(cached.items);
     renderLibrary();
     renderBurnTrackList();
     updateBurnFooter();
