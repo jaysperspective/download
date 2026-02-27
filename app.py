@@ -2144,9 +2144,58 @@ def run_job(job_id: str):
                     jobs[job_id]["output_path"] = final_path if os.path.isabs(final_path) else os.path.join(DOWNLOAD_DIR, final_path)
                 save_jobs()
         else:
-            with jobs_lock:
-                jobs[job_id]["status"] = "error"
-                save_jobs()
+            COOKIE_EXPIRED_SIGNAL = "The provided YouTube account cookies are no longer valid"
+            captured_output = "\n".join(log_lines)
+            if cookies_args and COOKIE_EXPIRED_SIGNAL in captured_output:
+                with jobs_lock:
+                    jobs[job_id]["log"] = jobs[job_id].get("log", "") + "\n[auto-retry] Cookies expired — retrying without authentication...\n"
+                    jobs[job_id]["status"] = "running"
+
+                cmd_no_cookies = [cmd[0]] + [a for a in cmd[1:] if a not in ("--cookies", COOKIES_PATH)]
+
+                p2 = subprocess.Popen(cmd_no_cookies, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                with jobs_lock:
+                    jobs[job_id]["process"] = p2
+                log_lines = []
+                for raw_line in p2.stdout:
+                    line = raw_line.rstrip()
+                    log_lines.append(line)
+                    try:
+                        log_file.write(line + "\n")
+                    except Exception:
+                        pass
+                    if os.path.isabs(line):
+                        if os.path.splitext(line)[1].lower() not in _IMAGE_EXTS:
+                            output_paths.append(line)
+                            output_path = line
+                    if "Destination:" in line and not output_path:
+                        last_file = line.split("Destination:", 1)[-1].strip()
+                    with jobs_lock:
+                        jobs[job_id]["log"] = "\n".join(log_lines[-120:])
+                        if output_path:
+                            jobs[job_id]["output_path"] = output_path
+                            jobs[job_id]["output_paths"] = list(output_paths)
+                    with jobs_lock:
+                        if jobs[job_id].get("cancel_requested"):
+                            try:
+                                p2.terminate()
+                            except Exception:
+                                pass
+                code = p2.wait()
+
+            if code == 0:
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id]["output_paths"] = list(output_paths)
+                    final_path = output_path or last_file
+                    if final_path:
+                        jobs[job_id]["file"] = os.path.basename(final_path)
+                        jobs[job_id]["output_path"] = final_path if os.path.isabs(final_path) else os.path.join(DOWNLOAD_DIR, final_path)
+                    save_jobs()
+            else:
+                with jobs_lock:
+                    jobs[job_id]["status"] = "error"
+                    save_jobs()
     except Exception as e:
         with jobs_lock:
             jobs[job_id]["status"] = "error"
