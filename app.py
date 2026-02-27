@@ -414,6 +414,7 @@ HTML = """
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>+downloads</title>
   <link rel="icon" type="image/png" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -743,6 +744,52 @@ HTML = """
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #353333; border-radius: 3px; }
+
+    /* ── Tablet ────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .main { grid-template-columns: 1fr; padding: 14px; }
+      .right-col { position: static; top: auto; }
+      .lib-list  { max-height: 280px; }
+      .burn-tracklist { max-height: 200px; }
+    }
+
+    /* ── Mobile / iPhone ───────────────────────────────────── */
+    @media (max-width: 600px) {
+      .header { padding: 0 14px; height: 52px; }
+      .logo   { font-size: 20px; }
+      .main   { padding: 10px; gap: 0; }
+      .card   { padding: 16px 14px; border-radius: 12px; margin-bottom: 10px; }
+
+      /* URL row — stack on narrow screens */
+      .url-row   { flex-wrap: wrap; gap: 8px; }
+      .btn-primary { width: 100%; padding: 14px; font-size: 16px; }
+
+      /* Type row — full-width select, full-width button */
+      .type-row { flex-wrap: wrap; gap: 8px; }
+      .type-row select { min-width: 0; }
+      .btn-secondary { width: 100%; text-align: center; }
+
+      /* Token row */
+      .token-row { flex-wrap: wrap; gap: 8px; }
+      .token-row .btn-ghost { width: 100%; }
+
+      /* History rows — wrap action buttons below title */
+      .hist-row  { flex-wrap: wrap; }
+      .hist-btns { width: 100%; justify-content: flex-end; margin-top: 6px; }
+
+      /* Library */
+      .lib-list       { max-height: 220px; }
+      .lib-tabs button { padding: 6px 12px; font-size: 12px; }
+
+      /* Burn card */
+      .burn-tracklist  { max-height: 160px; }
+      .burn-queue-list { max-height: 110px; }
+      .burn-ctrl-row   { flex-wrap: wrap; }
+      .btn-burn        { width: 100%; margin-top: 6px; }
+
+      /* Status log */
+      pre#log { font-size: 11px; max-height: 160px; }
+    }
   </style>
 </head>
 <body>
