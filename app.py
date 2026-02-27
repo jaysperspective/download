@@ -1009,17 +1009,14 @@ HTML = """
   </div>
 
   <!-- Token gate modal -->
-  <div id="tokenModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center;">
-    <div style="background:#1a1a1a; border:1px solid #333; border-radius:14px; padding:32px 28px; width:340px; max-width:90vw; box-shadow:0 8px 40px rgba(0,0,0,0.6);">
-      <h2 style="margin:0 0 8px; font-size:18px; color:#f0f0f0;">Enter your token</h2>
-      <p style="margin:0 0 20px; font-size:13px; color:#888;">A token is required to use this app.</p>
-      <input id="tokenModalInput" type="text" placeholder="Token" autocomplete="off"
-        style="width:100%; box-sizing:border-box; background:#111; border:1px solid #444; border-radius:8px; padding:10px 12px; color:#f0f0f0; font-size:14px; outline:none; margin-bottom:14px;"
+  <div id="tokenModal" style="display:none; position:fixed; inset:0; background:rgba(12,10,10,0.82); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); z-index:1000; align-items:center; justify-content:center; padding:16px;">
+    <div class="card" style="width:100%; max-width:360px; box-shadow:0 32px 80px rgba(0,0,0,0.85); animation:modalPop 0.2s cubic-bezier(0.34,1.4,0.64,1);">
+      <h2 style="margin:0 0 6px; font-size:18px; font-weight:800; color:#f0eef0; letter-spacing:-0.3px;">Enter your token</h2>
+      <p style="margin:0 0 18px; font-size:13px; color:#555; line-height:1.5;">A token is required to use this app.</p>
+      <input id="tokenModalInput" type="text" placeholder="Bearer token" autocomplete="off"
+        style="width:100%; display:block; margin-bottom:12px; flex:none;"
         onkeydown="if(event.key==='Enter') submitTokenModal();" />
-      <button onclick="submitTokenModal()"
-        style="width:100%; padding:11px; background:#e03c8a; border:none; border-radius:8px; color:#fff; font-size:15px; font-weight:600; cursor:pointer;">
-        Submit
-      </button>
+      <button onclick="submitTokenModal()" class="btn-primary" style="width:100%; margin:0; display:block;">Submit</button>
     </div>
   </div>
 
