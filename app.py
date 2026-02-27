@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import subprocess
@@ -53,6 +54,7 @@ JOB_TTL_SECONDS = int(os.environ.get("YT_UI_JOB_TTL_SECONDS", str(60 * 60)))
 FILE_TTL_DAYS = float(os.environ.get("YT_UI_FILE_TTL_DAYS", "0"))  # 0 = disabled
 VERSION = "1.3"
 COOKIES_PATH = os.environ.get("YT_UI_COOKIES") or ""
+COOKIES_PASSWORD = os.environ.get("YT_UI_COOKIES_PASSWORD") or ""
 MAX_QUEUE_DEPTH = int(os.environ.get("YT_UI_MAX_QUEUE", "10"))
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
@@ -77,6 +79,138 @@ job_sema = threading.Semaphore(MAX_CONCURRENT_JOBS)
 history_lock = threading.Lock()
 job_queue = deque()
 queue_cv = threading.Condition()
+
+ADMIN_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>+downloads / admin</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1818;
+      color: #f0eef0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: #242222;
+      border: 1px solid #2e2c2c;
+      border-radius: 16px;
+      padding: 32px 36px;
+      width: 100%;
+      max-width: 420px;
+    }
+    h1 {
+      font-size: 20px;
+      font-weight: 800;
+      color: #db52a6;
+      margin-bottom: 24px;
+      letter-spacing: -0.5px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #888;
+      margin-bottom: 6px;
+      margin-top: 16px;
+    }
+    label:first-of-type { margin-top: 0; }
+    input[type=password], input[type=file] {
+      width: 100%;
+      background: #1a1818;
+      border: 1.5px solid #353333;
+      color: #f0eef0;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type=password]:focus { border-color: #db52a6; }
+    input[type=file] { cursor: pointer; }
+    input::placeholder { color: #464444; }
+    button {
+      margin-top: 22px;
+      width: 100%;
+      background: #db52a6;
+      color: #fff;
+      border: none;
+      padding: 13px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+    button:hover { background: #c9479a; }
+    button:active { transform: scale(0.97); }
+    #status {
+      margin-top: 16px;
+      font-size: 14px;
+      font-weight: 600;
+      min-height: 20px;
+      text-align: center;
+    }
+    .ok  { color: #4caf7d; }
+    .err { color: #e05c5c; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>+downloads admin</h1>
+    <label for="pw">Password</label>
+    <input type="password" id="pw" placeholder="YT_UI_COOKIES_PASSWORD">
+    <label for="file">cookies.txt</label>
+    <input type="file" id="file" accept=".txt">
+    <button id="btn" onclick="upload()">Upload</button>
+    <div id="status"></div>
+  </div>
+  <script>
+    async function upload() {
+      const pw   = document.getElementById('pw').value;
+      const file = document.getElementById('file').files[0];
+      const st   = document.getElementById('status');
+      const btn  = document.getElementById('btn');
+      st.textContent = '';
+      st.className = '';
+      if (!pw)   { st.textContent = 'Password required.';   st.className = 'err'; return; }
+      if (!file) { st.textContent = 'Select a file first.'; st.className = 'err'; return; }
+      btn.disabled = true;
+      btn.textContent = 'Uploading…';
+      try {
+        const fd = new FormData();
+        fd.append('password', pw);
+        fd.append('cookies', file);
+        const r = await fetch('/upload-cookies', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (r.ok) {
+          st.textContent = 'Uploaded successfully.';
+          st.className = 'ok';
+          document.getElementById('pw').value = '';
+          document.getElementById('file').value = '';
+        } else {
+          st.textContent = j.error || 'Upload failed.';
+          st.className = 'err';
+        }
+      } catch (e) {
+        st.textContent = 'Network error.';
+        st.className = 'err';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload';
+      }
+    }
+  </script>
+</body>
+</html>
+"""
 
 HTML = """
 <!doctype html>
@@ -2591,6 +2725,28 @@ def burn_status(burn_id):
     if not job:
         return jsonify({"error": "Unknown burn job"}), 404
     return jsonify(job)
+
+@app.get("/admin")
+def admin_page():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    return render_template_string(ADMIN_HTML)
+
+
+@app.post("/upload-cookies")
+def upload_cookies():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    if not hmac.compare_digest(request.form.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    if not COOKIES_PATH:
+        return jsonify({"error": "YT_UI_COOKIES not configured"}), 400
+    f = request.files.get("cookies")
+    if not f:
+        return jsonify({"error": "No file provided"}), 400
+    f.save(COOKIES_PATH)
+    return jsonify({"ok": True})
+
 
 @app.after_request
 def add_security_headers(response):
