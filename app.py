@@ -4,6 +4,8 @@ import subprocess
 import threading
 import time
 import uuid
+import ipaddress
+import socket
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,6 +53,8 @@ JOB_TTL_SECONDS = int(os.environ.get("YT_UI_JOB_TTL_SECONDS", str(60 * 60)))
 FILE_TTL_DAYS = float(os.environ.get("YT_UI_FILE_TTL_DAYS", "0"))  # 0 = disabled
 VERSION = "1.3"
 COOKIES_PATH = os.environ.get("YT_UI_COOKIES") or ""
+MAX_QUEUE_DEPTH = int(os.environ.get("YT_UI_MAX_QUEUE", "10"))
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 _spotify_token_cache: dict = {}
@@ -610,7 +614,13 @@ HTML = """
 <script>
 const IS_LOCAL = {{ 'true' if is_local else 'false' }};
 let currentJob = null;
-let savedToken = localStorage.getItem("yt_token") || "";
+let savedToken = sessionStorage.getItem("yt_token") || "";
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 let libData = { albums: [], songs: [], videos: [] };
 let activeLibTab = 'albums';
 
@@ -1073,7 +1083,7 @@ async function poll() {
   } else if (data.file || data.output_path) {
     const name = data.file || data.output_path.split('/').pop();
     document.getElementById('meta').innerHTML =
-      'File: <a href="/download/' + currentJob + '" target="_blank">' + name + '</a>'
+      'File: <a href="/download/' + currentJob + '" target="_blank">' + escHtml(name) + '</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   }
   if (data.status === "done") {
@@ -1156,7 +1166,7 @@ function resetUI() {
 
 function saveToken() {
   savedToken = document.getElementById('token').value.trim();
-  localStorage.setItem("yt_token", savedToken);
+  sessionStorage.setItem("yt_token", savedToken);
 }
 
 async function openFolder() {
@@ -1207,11 +1217,11 @@ function buildHistoryList(items) {
       : (item.title || (item.output_path ? item.output_path.split('/').pop() : item.url || ''));
     const statusCls = 'hist-status ' + (item.final_status || 'cancelled');
     left.innerHTML =
-      '<div class="hist-main">' + (mainLabel || item.url || '') + '</div>'
+      '<div class="hist-main">' + escHtml(mainLabel || item.url || '') + '</div>'
       + '<div class="hist-sub">'
-      + '<span class="hist-tag">' + item.type + '</span>'
-      + '<span class="' + statusCls + '">' + (item.final_status || '') + '</span>'
-      + '<span>' + item.timestamp + '</span>'
+      + '<span class="hist-tag">' + escHtml(item.type) + '</span>'
+      + '<span class="' + escHtml(statusCls) + '">' + escHtml(item.final_status || '') + '</span>'
+      + '<span>' + escHtml(item.timestamp) + '</span>'
       + '</div>';
     const right = document.createElement('div');
     right.className = 'hist-btns';
@@ -1313,7 +1323,10 @@ checkBurner();
 
 def require_auth():
     if not VALID_TOKENS:
-        return  # token disabled; rely on localhost binding
+        host = request.host.split(":")[0].lower().strip("[]")
+        if host not in _LOCAL_HOSTS:
+            abort(403)
+        return
     header = request.headers.get("Authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or token not in VALID_TOKENS:
@@ -1322,8 +1335,24 @@ def require_auth():
 def is_valid_url(url: str) -> bool:
     if not url:
         return False
-    parsed = urlparse(url)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    hostname = (parsed.hostname or "").strip("[]")
+    if not hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in infos:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if not ip.is_global:
+                return False
+    except (socket.gaierror, ValueError, OSError):
+        return False
+    return True
 
 def detect_soundcloud(url: str) -> bool:
     try:
@@ -1462,6 +1491,9 @@ def _parse_dt(val):
         except Exception:
             pass
     return None
+
+def _sanitize_metadata(s: str) -> str:
+    return re.sub(r'[\x00\n\r\t]', ' ', str(s or '')).replace('"', "'")
 
 def detect_spotify(url: str) -> bool:
     try:
@@ -1677,8 +1709,6 @@ def run_job(job_id: str):
     cookies_args = []
     if COOKIES_PATH and os.path.exists(COOKIES_PATH):
         cookies_args = ["--cookies", COOKIES_PATH]
-    elif sys.platform == "darwin" and not getattr(sys, "frozen", False):
-        cookies_args = ["--cookies-from-browser", "safari"]
 
     if job_type == "audio":
         cmd = [
@@ -1768,8 +1798,8 @@ def run_job(job_id: str):
                         (old_log + f"\n[{idx+1}/{total}] {artist} - {title}").splitlines()[-120:]
                     )
                 # Build yt-dlp ytsearch command
-                safe_title = title.replace('"', "'")
-                safe_artist = artist.replace('"', "'")
+                safe_title  = _sanitize_metadata(title)
+                safe_artist = _sanitize_metadata(artist)
                 safe_base = re.sub(r'[\\/:*?"<>|]', "_", f"{artist} - {title}")[:160]
                 out_template = os.path.join(out_dir, safe_base + ".%(ext)s")
                 ppa = f'ffmpeg:-metadata title="{safe_title}" -metadata artist="{safe_artist}"'
@@ -1878,8 +1908,8 @@ def run_job(job_id: str):
                         (old_log + f"\n[{idx+1}/{total}] {artist} - {title}").splitlines()[-120:]
                     )
                 # Build yt-dlp ytsearch command
-                safe_title = title.replace('"', "'")
-                safe_artist = artist.replace('"', "'")
+                safe_title  = _sanitize_metadata(title)
+                safe_artist = _sanitize_metadata(artist)
                 safe_base = re.sub(r'[\\/:*?"<>|]', "_", f"{artist} - {title}")[:160]
                 out_template = os.path.join(out_dir, safe_base + ".%(ext)s")
                 ppa = f'ffmpeg:-metadata title="{safe_title}" -metadata artist="{safe_artist}"'
@@ -2081,7 +2111,7 @@ def index():
 @app.post("/start")
 def start():
     require_auth()
-    data = request.get_json(force=True)
+    data = request.get_json() or {}
     url = (data.get("url") or "").strip()
     job_type = (data.get("type") or "video").strip().lower()
     if not is_valid_url(url):
@@ -2142,6 +2172,10 @@ def start():
         }
         save_jobs()
     with queue_cv:
+        if len(job_queue) >= MAX_QUEUE_DEPTH:
+            with jobs_lock:
+                jobs.pop(job_id, None)
+            return jsonify({"error": "Queue is full. Try again later."}), 429
         job_queue.append(job_id)
         queue_cv.notify()
     return jsonify({"job_id": job_id, "status": "queued"})
@@ -2180,13 +2214,13 @@ def download(job_id):
                 for fpath in existing:
                     zf.write(fpath, os.path.basename(fpath))
         except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             abort(500)
 
         @after_this_request
         def cleanup(response):
             try:
-                os.remove(zip_path)
-                os.rmdir(tmp_dir)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception:
                 pass
             return response
@@ -2226,23 +2260,33 @@ def history():
     require_auth()
     limit = int(request.args.get("limit", "10"))
     items = load_history()[-limit:]
+    host = request.host.split(":")[0].lower().strip("[]")
+    if host not in _LOCAL_HOSTS:
+        for item in items:
+            if item.get("output_path"):
+                item["output_path"] = os.path.basename(item["output_path"])
+            if item.get("output_paths"):
+                item["output_paths"] = [os.path.basename(p) for p in item["output_paths"] if p]
     return jsonify({"items": items[::-1]})
 
 @app.post("/reveal")
 def reveal():
     require_auth()
-    data = request.get_json(force=True)
+    data = request.get_json() or {}
     path = (data.get("path") or "").strip()
-    if path and Path(path).exists():
-        open_download_folder(path)
-        return jsonify({"status": "ok", "opened": path})
+    if path:
+        abs_dl   = os.path.abspath(DOWNLOAD_DIR)
+        abs_path = os.path.abspath(path)
+        if (abs_path == abs_dl or abs_path.startswith(abs_dl + os.sep)) and Path(abs_path).exists():
+            open_download_folder(abs_path)
+            return jsonify({"status": "ok", "opened": abs_path})
     open_download_folder()
     return jsonify({"status": "ok", "opened": DOWNLOAD_DIR})
 
 @app.post("/cancel")
 def cancel():
     require_auth()
-    data = request.get_json(force=True)
+    data = request.get_json() or {}
     job_id = (data.get("job_id") or "").strip()
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
@@ -2371,7 +2415,7 @@ def check_burner():
 @app.post("/burn-cd")
 def burn_cd_route():
     require_auth()
-    data = request.get_json(force=True)
+    data = request.get_json() or {}
     paths = [p for p in (data.get("paths") or [])
              if isinstance(p, str) and os.path.isfile(p) and os.path.abspath(p).startswith(os.path.abspath(DOWNLOAD_DIR))]
     if not paths:
@@ -2395,6 +2439,20 @@ def burn_status(burn_id):
         return jsonify({"error": "Unknown burn job"}), 404
     return jsonify(job)
 
+@app.after_request
+def add_security_headers(response):
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
 # restore persisted jobs then kick off background threads
 restore_jobs_from_disk()
 dispatcher_thread = threading.Thread(target=dispatcher, daemon=True)
@@ -2416,12 +2474,19 @@ if __name__ == "__main__":
     run_tray = args.menubar or menubar_env
 
     if is_frozen:
-        # Dock app: open browser automatically after Flask starts, then serve
-        def _open_browser():
-            time.sleep(1.5)
+        # If a server is already running on 5055, just open the browser and exit
+        _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _already_running = _probe.connect_ex(("127.0.0.1", 5055)) == 0
+        _probe.close()
+        if _already_running:
             webbrowser.open("http://127.0.0.1:5055")
-        threading.Thread(target=_open_browser, daemon=True).start()
-        run_flask()
+        else:
+            # Dock app: open browser automatically after Flask starts, then serve
+            def _open_browser():
+                time.sleep(1.5)
+                webbrowser.open("http://127.0.0.1:5055")
+            threading.Thread(target=_open_browser, daemon=True).start()
+            run_flask()
     elif run_tray:
         try:
             import rumps  # type: ignore
