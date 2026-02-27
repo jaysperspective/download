@@ -86,6 +86,8 @@ ADMIN_HTML = """
 <head>
   <meta charset="utf-8">
   <title>+downloads / admin</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -218,6 +220,8 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <title>+downloads</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
