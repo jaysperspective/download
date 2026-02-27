@@ -1351,6 +1351,51 @@ fetchHistory();
 fetchLibrary();
 checkBurner();
 </script>
+
+<footer style="text-align:center; padding:24px 16px 20px; font-size:12px; color:#555;">
+  <a href="#" onclick="document.getElementById('tcModal').style.display='flex'; return false;"
+     style="color:#555; text-decoration:underline; text-underline-offset:3px;">Terms &amp; Conditions</a>
+</footer>
+
+<!-- Terms & Conditions modal -->
+<div id="tcModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:2000; align-items:center; justify-content:center; padding:20px; box-sizing:border-box;">
+  <div style="background:#1a1a1a; border:1px solid #333; border-radius:14px; padding:32px 28px; width:600px; max-width:100%; max-height:85vh; overflow-y:auto; box-shadow:0 8px 40px rgba(0,0,0,0.7);">
+    <h2 style="margin:0 0 6px; font-size:18px; color:#f0f0f0;">Terms &amp; Conditions</h2>
+    <p style="margin:0 0 20px; font-size:12px; color:#555;">Last updated: February 2026</p>
+
+    <div style="font-size:13px; color:#aaa; line-height:1.7;">
+      <p><strong style="color:#f0f0f0;">USE AT YOUR OWN RISK.</strong> This tool is provided for personal, private use only. By using it, you agree to the following terms in full.</p>
+
+      <p><strong style="color:#f0f0f0;">1. No Warranty</strong><br>
+      This software is provided "as is", without warranty of any kind, express or implied. The operator makes no guarantees regarding availability, reliability, accuracy, or fitness for any purpose.</p>
+
+      <p><strong style="color:#f0f0f0;">2. Limitation of Liability</strong><br>
+      To the fullest extent permitted by applicable law, the operator of this service shall not be liable for any direct, indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use this tool, including but not limited to loss of data, loss of profits, or any other losses.</p>
+
+      <p><strong style="color:#f0f0f0;">3. Your Responsibility</strong><br>
+      You are solely responsible for ensuring that your use of this tool complies with all applicable laws in your jurisdiction, including copyright law. Downloading copyrighted content without authorization may be illegal. The operator does not condone or encourage any unlawful activity.</p>
+
+      <p><strong style="color:#f0f0f0;">4. No Affiliation</strong><br>
+      This tool is not affiliated with, endorsed by, or connected to YouTube, Google, SoundCloud, Spotify, Apple, or any other third-party platform. All trademarks belong to their respective owners.</p>
+
+      <p><strong style="color:#f0f0f0;">5. Indemnification</strong><br>
+      You agree to indemnify and hold harmless the operator from any claims, damages, or expenses (including legal fees) arising from your use of this service or your violation of these terms.</p>
+
+      <p><strong style="color:#f0f0f0;">6. Changes</strong><br>
+      These terms may be updated at any time without notice. Continued use of the service constitutes acceptance of the current terms.</p>
+
+      <p style="margin-top:24px; padding:14px; background:#111; border-radius:8px; color:#888; font-size:12px;">
+        By using this tool you acknowledge that you have read, understood, and agreed to these terms and that you use this service entirely at your own risk.
+      </p>
+    </div>
+
+    <button onclick="document.getElementById('tcModal').style.display='none'"
+      style="margin-top:20px; width:100%; padding:11px; background:#333; border:none; border-radius:8px; color:#f0f0f0; font-size:14px; cursor:pointer;">
+      Close
+    </button>
+  </div>
+</div>
+
 </body>
 </html>
 """
