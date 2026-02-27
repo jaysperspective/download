@@ -7,6 +7,7 @@ services:
       - /home/jh/cookies.txt:/cookies.txt
     environment:
       - YT_UI_TOKEN=${YT_UI_TOKEN}        # comma-separated: alice_abc,bob_xyz
+      - YT_UI_COOKIES_PASSWORD=${YT_UI_COOKIES_PASSWORD}
       - YT_UI_FILE_TTL_DAYS=7
       - FLASK_HOST=0.0.0.0
       - YT_UI_COOKIES=/cookies.txt
