@@ -19,6 +19,9 @@ services:
       - YT_UI_PER_IP_HOURLY=20
       - YT_UI_MAX_PLAYLIST_TRACKS=50
       - YT_UI_DISK_CAP_GB=20
+      - YT_UI_SMTP_USER=${YT_UI_SMTP_USER}
+      - YT_UI_SMTP_PASS=${YT_UI_SMTP_PASS}
+      - YT_UI_ALERT_EMAIL=${YT_UI_ALERT_EMAIL}
     ports:
       - "${APP_PORT:-5055}:5055"
 

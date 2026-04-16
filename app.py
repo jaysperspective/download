@@ -20,6 +20,8 @@ import urllib.request
 import urllib.error
 import tempfile
 import shutil
+import smtplib
+from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
@@ -53,11 +55,16 @@ PER_IP_HOURLY = int(os.environ.get("YT_UI_PER_IP_HOURLY", "20"))
 MAX_PLAYLIST_TRACKS = int(os.environ.get("YT_UI_MAX_PLAYLIST_TRACKS", "50"))
 DISK_CAP_GB = float(os.environ.get("YT_UI_DISK_CAP_GB", "20"))
 GLOBAL_RATE_PER_MIN = int(os.environ.get("YT_UI_GLOBAL_RATE_PER_MIN", "120"))
+SMTP_USER = os.environ.get("YT_UI_SMTP_USER", "")
+SMTP_PASS = os.environ.get("YT_UI_SMTP_PASS", "")
+ALERT_EMAIL = os.environ.get("YT_UI_ALERT_EMAIL", "")
 _ip_jobs_active: dict = {}
 _ip_recent: dict = {}
 _ip_lock = threading.Lock()
 _global_rate: dict = {}
 _global_rate_lock = threading.Lock()
+_last_cookie_alert: float = 0
+_cookie_alert_lock = threading.Lock()
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 _spotify_token_cache: dict = {}
@@ -120,6 +127,47 @@ def _release_ip(ip: str):
             _ip_jobs_active.pop(ip, None)
         else:
             _ip_jobs_active[ip] = current - 1
+
+
+_COOKIE_ERROR_PATTERNS = [
+    "Sign in to confirm you're not a bot",
+    "Sign in to confirm you",
+    "cookies expired",
+    "does not look like a Netscape format cookies file",
+    "Use --cookies-from-browser or --cookies",
+]
+
+
+def _check_cookie_alert(log_output: str):
+    """Send an email alert if yt-dlp output indicates cookie problems. Max once per 24h."""
+    global _last_cookie_alert
+    if not SMTP_USER or not SMTP_PASS or not ALERT_EMAIL:
+        return
+    if not any(pattern in log_output for pattern in _COOKIE_ERROR_PATTERNS):
+        return
+    with _cookie_alert_lock:
+        if time.time() - _last_cookie_alert < 86400:
+            return
+        _last_cookie_alert = time.time()
+    try:
+        msg = MIMEText(
+            "+downloads: YouTube cookies have expired or are invalid.\n\n"
+            "Downloads that rely on YouTube (including Spotify/Apple Music) will fail "
+            "until you upload fresh cookies.\n\n"
+            "To fix:\n"
+            "1. Open Chrome, go to youtube.com (make sure you're logged in)\n"
+            "2. Use the 'Get cookies.txt LOCALLY' extension to export cookies\n"
+            "3. Upload at https://digitaldownloads.space/admin\n\n"
+            f"Error detected:\n{log_output[-500:]}"
+        )
+        msg["Subject"] = "[+downloads] YouTube cookies expired — action needed"
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_EMAIL
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.send_message(msg)
+    except Exception:
+        pass
 
 
 def _is_safe_path(path: str) -> bool:
@@ -2060,6 +2108,10 @@ def run_job(job_id: str):
             save_jobs()
         job_sema.release()
         _release_ip(ip_val)
+        if status_val == "error":
+            with jobs_lock:
+                final_log = jobs[job_id].get("log", "")
+            _check_cookie_alert(final_log)
         # history record
         record = {
             "job_id": job_id,
