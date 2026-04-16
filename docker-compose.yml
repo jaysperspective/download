@@ -4,15 +4,23 @@ services:
     restart: unless-stopped
     volumes:
       - downloads:/data
-      - /home/jh/cookies.txt:/cookies.txt
+      - ./cookies.txt:/cookies.txt
     environment:
-      - YT_UI_TOKEN=${YT_UI_TOKEN}        # comma-separated: alice_abc,bob_xyz
       - YT_UI_COOKIES_PASSWORD=${YT_UI_COOKIES_PASSWORD}
-      - YT_UI_FILE_TTL_DAYS=7
-      - FLASK_HOST=0.0.0.0
       - YT_UI_COOKIES=/cookies.txt
+      - DOWNLOAD_DIR=/data/downloads
+      - YT_UI_STATE_DIR=/data/state
+      - FLASK_HOST=0.0.0.0
+      - YT_UI_FILE_TTL_DAYS=0.125
+      - YT_UI_JOB_TTL_SECONDS=14400
+      - YT_UI_MAX_CONCURRENT=3
+      - YT_UI_MAX_QUEUE=10
+      - YT_UI_PER_IP_CONCURRENT=2
+      - YT_UI_PER_IP_HOURLY=20
+      - YT_UI_MAX_PLAYLIST_TRACKS=50
+      - YT_UI_DISK_CAP_GB=20
     ports:
-      - "127.0.0.1:5055:5055"
+      - "${APP_PORT:-5055}:5055"
 
 volumes:
   downloads:

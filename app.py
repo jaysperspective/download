@@ -12,8 +12,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, send_from_directory, send_file, render_template_string, abort, after_this_request
-import webbrowser
-import argparse
 import sys
 import zipfile
 import base64
@@ -25,7 +23,7 @@ import shutil
 
 app = Flask(__name__)
 
-DOWNLOAD_DIR = os.path.expanduser("~/Downloads/YT")
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or os.path.expanduser("~/Downloads/YT")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 SOUNDCLOUD_DIR = os.path.join(DOWNLOAD_DIR, "SoundCloud")
 os.makedirs(SOUNDCLOUD_DIR, exist_ok=True)
@@ -35,11 +33,7 @@ os.makedirs(SPOTIFY_TRACKS_DIR, exist_ok=True)
 APPLE_MUSIC_DIR = os.path.join(DOWNLOAD_DIR, "AppleMusic")
 APPLE_MUSIC_TRACKS_DIR = os.path.join(APPLE_MUSIC_DIR, "Tracks")
 os.makedirs(APPLE_MUSIC_TRACKS_DIR, exist_ok=True)
-# Data directory: ~/Library/Application Support/+downloads when frozen, else next to app.py
-if getattr(sys, "frozen", False):
-    _data_dir = Path(os.path.expanduser("~/Library/Application Support/+downloads"))
-else:
-    _data_dir = Path(__file__).parent
+_data_dir = Path(os.environ.get("YT_UI_STATE_DIR") or Path(__file__).parent)
 _data_dir.mkdir(parents=True, exist_ok=True)
 
 HISTORY_PATH = _data_dir / "history.json"
@@ -47,8 +41,6 @@ JOBS_PATH    = _data_dir / "jobs.json"
 LOG_DIR      = _data_dir / "job-logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-_raw_tokens = os.environ.get("YT_UI_TOKEN") or ""
-VALID_TOKENS: set = {t.strip() for t in _raw_tokens.split(",") if t.strip()}
 MAX_CONCURRENT_JOBS = int(os.environ.get("YT_UI_MAX_CONCURRENT", "3"))
 JOB_TTL_SECONDS = int(os.environ.get("YT_UI_JOB_TTL_SECONDS", str(60 * 60)))
 FILE_TTL_DAYS = float(os.environ.get("YT_UI_FILE_TTL_DAYS", "0"))  # 0 = disabled
@@ -56,29 +48,76 @@ VERSION = "1.3"
 COOKIES_PATH = os.environ.get("YT_UI_COOKIES") or ""
 COOKIES_PASSWORD = os.environ.get("YT_UI_COOKIES_PASSWORD") or ""
 MAX_QUEUE_DEPTH = int(os.environ.get("YT_UI_MAX_QUEUE", "10"))
+PER_IP_CONCURRENT = int(os.environ.get("YT_UI_PER_IP_CONCURRENT", "2"))
+PER_IP_HOURLY = int(os.environ.get("YT_UI_PER_IP_HOURLY", "20"))
+MAX_PLAYLIST_TRACKS = int(os.environ.get("YT_UI_MAX_PLAYLIST_TRACKS", "50"))
+DISK_CAP_GB = float(os.environ.get("YT_UI_DISK_CAP_GB", "20"))
+_ip_jobs_active: dict = {}
+_ip_recent: dict = {}
+_ip_lock = threading.Lock()
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 _spotify_token_cache: dict = {}
 _spotify_token_lock = threading.Lock()
 
-# Binary paths — bundled inside .app when frozen, system PATH otherwise
-if getattr(sys, "frozen", False):
-    _bin_dir = Path(sys._MEIPASS)
-    YT_DLP_BIN = str(_bin_dir / "yt-dlp")
-    FFMPEG_BIN  = str(_bin_dir / "ffmpeg")
-else:
-    YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
-    FFMPEG_BIN  = shutil.which("ffmpeg") or "ffmpeg"
+YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
+FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 
 jobs = {}  # job_id -> {"status": "...", "log": "...", "file": "...", timestamps}
 jobs_lock = threading.RLock()
-burn_jobs = {}
-burn_lock = threading.Lock()
 job_sema = threading.Semaphore(MAX_CONCURRENT_JOBS)
 history_lock = threading.Lock()
 job_queue = deque()
 queue_cv = threading.Condition()
+
+
+def _client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _disk_usage_gb(path: str) -> float:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            fp = os.path.join(root, name)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total / (1024 ** 3)
+
+
+def _check_ip_limits(ip: str):
+    """Returns (error_message, status_code) tuple or (None, None) if OK.
+    On success, increments the active counter and records the request timestamp."""
+    now = time.time()
+    hour_ago = now - 3600
+    with _ip_lock:
+        recent = _ip_recent.setdefault(ip, deque())
+        while recent and recent[0] < hour_ago:
+            recent.popleft()
+        if len(recent) >= PER_IP_HOURLY:
+            return (f"Hourly request limit reached ({PER_IP_HOURLY}/hr). Try again later.", 429)
+        if _ip_jobs_active.get(ip, 0) >= PER_IP_CONCURRENT:
+            return (f"Too many active jobs for your IP (max {PER_IP_CONCURRENT}). Wait for one to finish.", 429)
+        _ip_jobs_active[ip] = _ip_jobs_active.get(ip, 0) + 1
+        recent.append(now)
+    return (None, None)
+
+
+def _release_ip(ip: str):
+    if not ip:
+        return
+    with _ip_lock:
+        current = _ip_jobs_active.get(ip, 0)
+        if current <= 1:
+            _ip_jobs_active.pop(ip, None)
+        else:
+            _ip_jobs_active[ip] = current - 1
 
 ADMIN_HTML = """
 <!doctype html>
@@ -612,140 +651,6 @@ HTML = """
     .lib-meta { font-size: 11px; color: #4a4848; margin-top: 2px; display: flex; align-items: center; gap: 5px; }
     .lib-empty { font-size: 13px; color: #444; text-align: center; padding: 40px 0; }
     .lib-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-    /* Burn card */
-    .burn-card-header {
-      display: flex; align-items: center; gap: 14px; margin-bottom: 14px;
-    }
-    .disc-gfx { flex-shrink: 0; }
-    .burn-card-title { font-size: 15px; font-weight: 700; color: #f0eef0; }
-    .burn-card-subtitle { font-size: 11px; color: #555; margin-top: 3px; }
-    .burn-tracklist {
-      overflow-y: auto; max-height: 260px; margin: 0 -4px;
-      padding: 0 4px;
-    }
-    .burn-track-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 8px 10px; border-radius: 9px; cursor: pointer;
-      transition: background 0.15s; margin-bottom: 2px;
-    }
-    .burn-track-row:hover { background: #2a2828; }
-    .burn-track-row input[type=checkbox] { width: 14px; height: 14px; accent-color: #db52a6; flex-shrink: 0; cursor: pointer; }
-    .burn-track-icon {
-      width: 30px; height: 30px; border-radius: 7px; flex-shrink: 0;
-      display: flex; align-items: center; justify-content: center; font-size: 14px;
-    }
-    .burn-track-icon.album { background: rgba(219,82,166,0.1); color: #db52a6; }
-    .burn-track-icon.song  { background: rgba(191,155,58,0.1);  color: #bf9b3a; }
-    .burn-track-info { flex: 1; min-width: 0; }
-    .burn-track-name { font-size: 13px; color: #c0b8c0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .burn-track-meta { font-size: 11px; color: #4a4848; margin-top: 2px; display: flex; gap: 5px; }
-    .burn-footer { margin-top: 14px; border-top: 1px solid #2a2828; padding-top: 14px; }
-    .burn-cap-wrap { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-    .burn-cap-track {
-      flex: 1; height: 4px; background: #1a1818; border-radius: 999px; overflow: hidden;
-    }
-    .burn-cap-fill {
-      height: 100%; width: 0%; border-radius: 999px;
-      background: linear-gradient(90deg, #db52a6, #bf9b3a); transition: width 0.3s;
-    }
-    .burn-cap-fill.over { background: #ff6b6b; }
-    .burn-cap-label { font-size: 11px; color: #555; white-space: nowrap; }
-    .burn-ctrl-row { display: flex; gap: 8px; align-items: center; }
-    .burn-mode-sel {
-      background: #1a1818; border: 1.5px solid #353333; color: #f0eef0;
-      padding: 9px 30px 9px 12px; border-radius: 9px; font-size: 13px;
-      flex: 1; cursor: pointer; appearance: none; -webkit-appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23555' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat; background-position: right 10px center;
-    }
-    .btn-burn {
-      background: #db52a6; color: #fff; border: none; flex-shrink: 0;
-      padding: 9px 20px; border-radius: 9px; font-size: 13px; font-weight: 700;
-      cursor: pointer; white-space: nowrap; transition: background 0.15s;
-    }
-    .btn-burn:hover { background: #c9479a; }
-    .btn-burn:disabled { background: #2e2c2c; color: #555; cursor: not-allowed; }
-    .burn-log {
-      margin-top: 10px; background: #141212; border: 1px solid #242222; border-radius: 8px;
-      color: #a09aa0; padding: 10px 12px; font-size: 11px; font-family: 'SF Mono', monospace;
-      max-height: 110px; overflow-y: auto; white-space: pre-wrap; display: none;
-    }
-    /* Burn modal */
-    .burn-modal-overlay {
-      position: fixed; inset: 0; z-index: 300;
-      display: flex; align-items: center; justify-content: center;
-      background: rgba(12, 10, 10, 0.78);
-      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    }
-    .burn-modal {
-      background: #242222; border: 1px solid #3a3838; border-radius: 18px;
-      width: min(540px, 92vw); max-height: 82vh;
-      display: flex; flex-direction: column; overflow: hidden;
-      box-shadow: 0 32px 80px rgba(0,0,0,0.85), 0 0 0 1px rgba(219,82,166,0.08);
-      animation: modalPop 0.2s cubic-bezier(0.34,1.4,0.64,1);
-    }
-    @keyframes modalPop {
-      from { opacity:0; transform: scale(0.88) translateY(16px); }
-      to   { opacity:1; transform: scale(1)    translateY(0); }
-    }
-    .burn-modal-header {
-      display: flex; align-items: center; gap: 14px;
-      padding: 20px 20px 0;
-    }
-    .burn-modal-title { font-size: 15px; font-weight: 700; color: #f0eef0; }
-    .burn-modal-sub   { font-size: 11px; color: #555; margin-top: 3px; }
-    .burn-modal-close {
-      margin-left: auto; background: #2e2c2c; border: 1px solid #3a3838; color: #888;
-      width: 28px; height: 28px; border-radius: 50%; font-size: 16px; line-height: 1;
-      cursor: pointer; display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0; transition: background 0.15s, color 0.15s;
-    }
-    .burn-modal-close:hover { background: #3a3838; color: #f0eef0; }
-    .burn-modal-search {
-      margin: 14px 20px 0;
-      background: #1a1818; border: 1.5px solid #353333; color: #f0eef0;
-      padding: 9px 13px; border-radius: 9px; font-size: 13px; outline: none;
-      transition: border-color 0.2s;
-    }
-    .burn-modal-search:focus { border-color: #db52a6; }
-    .burn-modal-search::placeholder { color: #464444; }
-    .burn-modal-tracklist {
-      flex: 1; overflow-y: auto; padding: 10px 12px;
-    }
-    .burn-modal-track {
-      display: flex; align-items: center; gap: 10px;
-      padding: 8px 10px; border-radius: 9px; cursor: pointer;
-      transition: background 0.12s; margin-bottom: 2px;
-    }
-    .burn-modal-track:hover { background: #2e2c2c; }
-    .burn-modal-track input[type=checkbox] { width: 14px; height: 14px; accent-color: #db52a6; flex-shrink: 0; }
-    .burn-modal-track-num { font-size: 11px; color: #4a4848; width: 22px; text-align: right; flex-shrink: 0; }
-    .burn-modal-track-name { font-size: 13px; color: #c8c0c8; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .burn-modal-footer {
-      display: flex; align-items: center; gap: 8px;
-      padding: 14px 20px; border-top: 1px solid #2a2828;
-    }
-    .burn-modal-count { font-size: 12px; color: #555; flex: 1; }
-    /* Queue badge on burn list rows */
-    .burn-queue-badge {
-      font-size: 11px; padding: 3px 9px; border-radius: 999px; flex-shrink: 0;
-      background: #252323; color: #555; font-weight: 600; border: 1px solid #353333;
-      transition: background 0.2s, color 0.2s, border-color 0.2s;
-    }
-    .burn-queue-badge.active { background: rgba(219,82,166,0.15); color: #db52a6; border-color: rgba(219,82,166,0.3); }
-    /* Burn queue list */
-    .burn-queue-section { margin-top: 14px; border-top: 1px solid #2a2828; padding-top: 12px; }
-    .burn-queue-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-    .burn-queue-label { font-size: 11px; font-weight: 700; color: #444; text-transform: uppercase; letter-spacing: 1px; }
-    .burn-queue-count { font-size: 11px; color: #555; }
-    .burn-queue-list { overflow-y: auto; max-height: 180px; }
-    .burn-queue-empty { font-size: 12px; color: #383636; text-align: center; padding: 18px 0; }
-    .burn-queue-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px; transition: background 0.12s; }
-    .burn-queue-item:hover { background: #2a2828; }
-    .burn-queue-num { font-size: 11px; color: #4a4848; width: 22px; text-align: right; flex-shrink: 0; }
-    .burn-queue-name { font-size: 12px; color: #b0a8b0; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .burn-queue-rm { background: transparent; border: none; color: #3e3c3c; cursor: pointer; padding: 2px 6px; border-radius: 5px; font-size: 15px; flex-shrink: 0; transition: color 0.15s; line-height: 1; }
-    .burn-queue-rm:hover { color: #ff6b6b; }
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #353333; border-radius: 3px; }
@@ -755,7 +660,6 @@ HTML = """
       .main { grid-template-columns: 1fr; padding: 14px; }
       .right-col { position: static; top: auto; }
       .lib-list  { max-height: 280px; }
-      .burn-tracklist { max-height: 200px; }
     }
 
     /* ── Mobile / iPhone ───────────────────────────────────── */
@@ -786,12 +690,6 @@ HTML = """
       .lib-list       { max-height: 220px; }
       .lib-tabs button { padding: 6px 12px; font-size: 12px; }
 
-      /* Burn card */
-      .burn-tracklist  { max-height: 160px; }
-      .burn-queue-list { max-height: 110px; }
-      .burn-ctrl-row   { flex-wrap: wrap; }
-      .btn-burn        { width: 100%; margin-top: 6px; }
-
       /* Status log */
       pre#log { font-size: 11px; max-height: 160px; }
     }
@@ -817,7 +715,6 @@ HTML = """
           <option value="spotify">Spotify</option>
           <option value="apple_music">Apple Music</option>
         </select>
-        <button class="btn-secondary" onclick="openFolder()">Open Folder</button>
       </div>
       <div id="scOptions">
         <label>Format:
@@ -830,19 +727,6 @@ HTML = """
       </div>
       <div id="spNote" class="note-pill">Spotify tracks are matched to YouTube and downloaded as MP3.</div>
       <div id="amNote" class="note-pill">Apple Music songs and albums are matched to YouTube and downloaded as MP3. Playlists are not supported.</div>
-      <details style="margin-top:14px;">
-        <summary style="font-size:12px; color:#444; cursor:pointer; list-style:none; display:flex; align-items:center; gap:5px; user-select:none;">
-          <span id="tokenChevron" style="font-size:10px; transition:transform 0.2s;">&#9654;</span>
-          <span>Advanced</span>
-        </summary>
-        <div style="margin-top:12px;">
-          <div class="token-row">
-            <input id="token" type="text" placeholder="Optional bearer token (YT_UI_TOKEN)" />
-            <button class="btn-ghost" onclick="saveToken()">Save token</button>
-          </div>
-          <p class="dir-label" style="margin-top:10px;">Downloads to: <b>{{download_dir}}</b></p>
-        </div>
-      </details>
     </div>
 
     <div class="card">
@@ -904,149 +788,12 @@ HTML = """
       </div>
     </a>
 
-    <!-- Burn a CD card -->
-    <div class="card" style="margin-top:16px;">
-      <div class="burn-card-header">
-        <div class="disc-gfx">
-          <svg width="52" height="52" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <radialGradient id="discBody" cx="38%" cy="30%" r="70%">
-                <stop offset="0%" stop-color="#4e4c4c"/>
-                <stop offset="45%" stop-color="#2e2c2c"/>
-                <stop offset="100%" stop-color="#1a1818"/>
-              </radialGradient>
-              <linearGradient id="sheen" x1="0%" y1="0%" x2="100%" y2="110%">
-                <stop offset="0%"   stop-color="rgba(219,82,166,0.45)"/>
-                <stop offset="28%"  stop-color="rgba(191,155,58,0.3)"/>
-                <stop offset="58%"  stop-color="rgba(91,155,213,0.25)"/>
-                <stop offset="100%" stop-color="rgba(72,199,142,0.2)"/>
-              </linearGradient>
-              <radialGradient id="hubGrad" cx="45%" cy="38%" r="65%">
-                <stop offset="0%" stop-color="#3a3838"/>
-                <stop offset="100%" stop-color="#1c1a1a"/>
-              </radialGradient>
-            </defs>
-            <circle cx="26" cy="26" r="24" fill="url(#discBody)" stroke="#3a3838" stroke-width="1.2"/>
-            <circle cx="26" cy="26" r="24" fill="url(#sheen)"/>
-            <circle cx="26" cy="26" r="19.5" fill="none" stroke="rgba(255,255,255,0.055)" stroke-width="3"/>
-            <circle cx="26" cy="26" r="15"   fill="none" stroke="rgba(255,255,255,0.04)"  stroke-width="2.5"/>
-            <circle cx="26" cy="26" r="11"   fill="none" stroke="rgba(255,255,255,0.03)"  stroke-width="2"/>
-            <circle cx="26" cy="26" r="8"  fill="url(#hubGrad)" stroke="#404040" stroke-width="0.8"/>
-            <circle cx="26" cy="26" r="3.2" fill="#0f0d0d"/>
-          </svg>
-        </div>
-        <div style="flex:1; min-width:0;">
-          <div class="burn-card-title">Burn a CD</div>
-          <div class="burn-card-subtitle" id="burnerStatus">Checking for optical drive…</div>
-        </div>
-        <div style="display:flex; gap:6px;">
-          <button class="hist-btn" onclick="selectAllBurn()">All</button>
-          <button class="hist-btn" onclick="clearBurnSelection()">Clear</button>
-        </div>
-      </div>
-      <div class="burn-tracklist" id="burnTrackList">
-        <div class="lib-empty">No downloads yet.</div>
-      </div>
-      <div class="burn-queue-section" id="burnQueueSection">
-        <div class="burn-queue-header">
-          <span class="burn-queue-label">Queue</span>
-          <span class="burn-queue-count" id="burnQueueCount">0 tracks</span>
-        </div>
-        <div class="burn-queue-list" id="burnQueueList">
-          <div class="burn-queue-empty">No tracks queued yet.</div>
-        </div>
-      </div>
-      <div class="burn-footer">
-        <div class="burn-cap-wrap">
-          <div class="burn-cap-track"><div class="burn-cap-fill" id="burnCapFill"></div></div>
-          <span class="burn-cap-label" id="burnCapLabel">0 / 74 min</span>
-        </div>
-        <div class="burn-ctrl-row">
-          <select class="burn-mode-sel" id="burnMode">
-            <option value="data">Data CD  ·  MP3</option>
-            <option value="audio">Audio CD  ·  AIFF</option>
-          </select>
-          <button class="btn-burn" id="burnBtn" onclick="doBurn()" disabled>Burn CD</button>
-        </div>
-        <div class="burn-log" id="burnLog"></div>
-      </div>
-    </div>
   </div><!-- /right-col -->
 
   </main>
 
-  <!-- Burn tracklist modal -->
-  <div class="burn-modal-overlay" id="burnModalOverlay" style="display:none;" onclick="closeBurnModalOutside(event)">
-    <div class="burn-modal">
-      <div class="burn-modal-header">
-        <svg width="36" height="36" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
-          <defs>
-            <radialGradient id="mDiscBody" cx="38%" cy="30%" r="70%">
-              <stop offset="0%" stop-color="#4e4c4c"/><stop offset="45%" stop-color="#2e2c2c"/><stop offset="100%" stop-color="#1a1818"/>
-            </radialGradient>
-            <linearGradient id="mSheen" x1="0%" y1="0%" x2="100%" y2="110%">
-              <stop offset="0%" stop-color="rgba(219,82,166,0.45)"/><stop offset="28%" stop-color="rgba(191,155,58,0.3)"/>
-              <stop offset="58%" stop-color="rgba(91,155,213,0.25)"/><stop offset="100%" stop-color="rgba(72,199,142,0.2)"/>
-            </linearGradient>
-          </defs>
-          <circle cx="26" cy="26" r="24" fill="url(#mDiscBody)" stroke="#3a3838" stroke-width="1.2"/>
-          <circle cx="26" cy="26" r="24" fill="url(#mSheen)"/>
-          <circle cx="26" cy="26" r="19.5" fill="none" stroke="rgba(255,255,255,0.055)" stroke-width="3"/>
-          <circle cx="26" cy="26" r="14"   fill="none" stroke="rgba(255,255,255,0.04)"  stroke-width="2.5"/>
-          <circle cx="26" cy="26" r="8" fill="#1c1a1a" stroke="#404040" stroke-width="0.8"/>
-          <circle cx="26" cy="26" r="3.2" fill="#0f0d0d"/>
-        </svg>
-        <div>
-          <div class="burn-modal-title" id="burnModalTitle">Album</div>
-          <div class="burn-modal-sub"   id="burnModalSub"></div>
-        </div>
-        <button class="burn-modal-close" onclick="closeBurnModal()">&#10005;</button>
-      </div>
-      <input class="burn-modal-search" id="burnModalSearch" type="text" placeholder="Search tracks…" oninput="filterModalTracks()" />
-      <div class="burn-modal-tracklist" id="burnModalTracks"></div>
-      <div class="burn-modal-footer">
-        <button class="hist-btn" onclick="selectAllModal()">All</button>
-        <button class="hist-btn" onclick="clearModal()">Clear</button>
-        <span class="burn-modal-count" id="burnModalCount"></span>
-        <button class="btn-burn" id="burnModalAddBtn" onclick="addModalToQueue()" disabled>Add to Queue</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Token gate modal -->
-  <div id="tokenModal" style="display:none; position:fixed; inset:0; background:rgba(12,10,10,0.82); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); z-index:1000; align-items:center; justify-content:center; padding:16px;">
-    <div class="card" style="width:100%; max-width:360px; box-shadow:0 32px 80px rgba(0,0,0,0.85); animation:modalPop 0.2s cubic-bezier(0.34,1.4,0.64,1);">
-      <h2 style="margin:0 0 6px; font-size:18px; font-weight:800; color:#f0eef0; letter-spacing:-0.3px;">Enter your token</h2>
-      <p style="margin:0 0 18px; font-size:13px; color:#555; line-height:1.5;">A token is required to use this app.</p>
-      <input id="tokenModalInput" type="text" placeholder="Bearer token" autocomplete="off"
-        style="width:100%; display:block; margin-bottom:12px; flex:none;"
-        onkeydown="if(event.key==='Enter') submitTokenModal();" />
-      <button onclick="submitTokenModal()" class="btn-primary" style="width:100%; margin:0; display:block;">Submit</button>
-    </div>
-  </div>
-
 <script>
-const IS_LOCAL = {{ 'true' if is_local else 'false' }};
 let currentJob = null;
-let savedToken = sessionStorage.getItem("yt_token") || "";
-
-function showTokenModal() {
-  const m = document.getElementById('tokenModal');
-  m.style.display = 'flex';
-  document.getElementById('tokenModalInput').focus();
-}
-function hideTokenModal() {
-  document.getElementById('tokenModal').style.display = 'none';
-}
-function submitTokenModal() {
-  const val = document.getElementById('tokenModalInput').value.trim();
-  if (!val) return;
-  savedToken = val;
-  sessionStorage.setItem("yt_token", savedToken);
-  document.getElementById('token').value = savedToken;
-  hideTokenModal();
-}
-if (!IS_LOCAL && !savedToken) showTokenModal();
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -1135,301 +882,27 @@ function renderLibrary() {
     info.append(name, meta);
     const btns = document.createElement('div');
     btns.className = 'hist-btns';
-    const revealPath = activeLibTab === 'albums'
-      ? item.output_paths[0]
-      : (item.output_path || (item.output_paths && item.output_paths[0]) || '');
-    if (IS_LOCAL) {
-      const revBtn = document.createElement('button');
-      revBtn.className = 'hist-btn';
-      revBtn.textContent = 'Reveal';
-      revBtn.onclick = e => { e.stopPropagation(); reveal(revealPath); };
-      btns.appendChild(revBtn);
-    } else if (activeLibTab !== 'albums' && item.job_id) {
+    if (activeLibTab !== 'albums' && item.job_id) {
       const dlBtn = document.createElement('button');
       dlBtn.className = 'hist-btn';
       dlBtn.textContent = 'Download';
-      dlBtn.onclick = e => { e.stopPropagation(); window.location.href = '/file/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
+      dlBtn.onclick = e => { e.stopPropagation(); window.location.href = '/file/' + item.job_id; };
       btns.appendChild(dlBtn);
     }
     if (activeLibTab === 'albums' && item.job_id) {
       const zipBtn = document.createElement('button');
       zipBtn.className = 'hist-btn';
       zipBtn.textContent = 'ZIP';
-      zipBtn.onclick = e => { e.stopPropagation(); window.location.href = '/download/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
+      zipBtn.onclick = e => { e.stopPropagation(); window.location.href = '/download/' + item.job_id; };
       btns.appendChild(zipBtn);
     }
-    row.onclick = () => reveal(revealPath);
     row.append(icon, info, btns);
     container.appendChild(row);
   });
 }
 
-// ── Burn a CD ─────────────────────────────────────────────────────────────────
-let burnPaths = [];
-let activeBurnId = null;
-let modalItem = null;
-let modalSelected = new Set();
-
-function openBurnModal(item) {
-  modalItem = item;
-  const paths = item._kind === 'album'
-    ? (item.output_paths || [])
-    : [item.output_path || (item.output_paths && item.output_paths[0]) || ''];
-  // Pre-check paths already in burn queue
-  modalSelected = new Set(paths.filter(p => burnPaths.includes(p)));
-  document.getElementById('burnModalTitle').textContent = item._kind === 'album' ? item.albumName : item.songName;
-  document.getElementById('burnModalSub').textContent =
-    item.type + (item._kind === 'album' ? ' \u00b7 ' + paths.length + ' tracks' : ' \u00b7 single');
-  document.getElementById('burnModalSearch').value = '';
-  renderModalTracks('');
-  document.getElementById('burnModalOverlay').style.display = 'flex';
-}
-
-function filterModalTracks() {
-  renderModalTracks(document.getElementById('burnModalSearch').value);
-}
-
-function renderModalTracks(query) {
-  const q = (query || '').toLowerCase();
-  const container = document.getElementById('burnModalTracks');
-  container.innerHTML = '';
-  const paths = modalItem._kind === 'album'
-    ? (modalItem.output_paths || [])
-    : [modalItem.output_path || (modalItem.output_paths && modalItem.output_paths[0]) || ''];
-  const filtered = paths.map((p, i) => ({ p, i, name: p.split('/').pop().replace(/\.[^.]+$/, '') }))
-    .filter(t => !q || t.name.toLowerCase().includes(q));
-  if (!filtered.length) {
-    container.innerHTML = '<div class="lib-empty" style="padding:24px 0;">No tracks match.</div>';
-    updateModalCount();
-    return;
-  }
-  filtered.forEach(({ p, i, name }) => {
-    const row = document.createElement('div');
-    row.className = 'burn-modal-track';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = modalSelected.has(p);
-    const toggle = () => {
-      if (cb.checked) modalSelected.add(p); else modalSelected.delete(p);
-      updateModalCount();
-    };
-    cb.onchange = e => { e.stopPropagation(); toggle(); };
-    row.onclick = () => { cb.checked = !cb.checked; toggle(); };
-    const num = document.createElement('span');
-    num.className = 'burn-modal-track-num';
-    num.textContent = String(i + 1).padStart(2, '0');
-    const lbl = document.createElement('span');
-    lbl.className = 'burn-modal-track-name';
-    lbl.textContent = name;
-    row.append(cb, num, lbl);
-    container.appendChild(row);
-  });
-  updateModalCount();
-}
-
-function updateModalCount() {
-  const n = modalSelected.size;
-  document.getElementById('burnModalCount').textContent =
-    n === 0 ? 'No tracks selected' : n + ' track' + (n !== 1 ? 's' : '') + ' selected';
-  document.getElementById('burnModalAddBtn').disabled = n === 0;
-}
-
-function selectAllModal() {
-  const paths = modalItem._kind === 'album'
-    ? (modalItem.output_paths || [])
-    : [modalItem.output_path || (modalItem.output_paths && modalItem.output_paths[0]) || ''];
-  paths.forEach(p => modalSelected.add(p));
-  renderModalTracks(document.getElementById('burnModalSearch').value);
-}
-
-function clearModal() {
-  modalSelected.clear();
-  renderModalTracks(document.getElementById('burnModalSearch').value);
-}
-
-function addModalToQueue() {
-  modalSelected.forEach(p => { if (p && !burnPaths.includes(p)) burnPaths.push(p); });
-  updateBurnFooter();
-  renderBurnTrackList();
-  closeBurnModal();
-}
-
-function closeBurnModal() {
-  document.getElementById('burnModalOverlay').style.display = 'none';
-  modalItem = null;
-  modalSelected.clear();
-}
-
-function closeBurnModalOutside(e) {
-  if (e.target === document.getElementById('burnModalOverlay')) closeBurnModal();
-}
-
-function renderBurnTrackList() {
-  const container = document.getElementById('burnTrackList');
-  container.innerHTML = '';
-  const all = [
-    ...libData.albums.map(a => ({ ...a, _kind: 'album' })),
-    ...libData.songs.map(s => ({ ...s, _kind: 'song' })),
-  ];
-  if (!all.length) {
-    container.innerHTML = '<div class="lib-empty">No downloads yet.</div>';
-    return;
-  }
-  all.forEach(item => {
-    const paths = item._kind === 'album'
-      ? (item.output_paths || [])
-      : [item.output_path || (item.output_paths && item.output_paths[0]) || ''];
-    const label = item._kind === 'album' ? item.albumName : item.songName;
-    const inQueue = paths.filter(p => burnPaths.includes(p)).length;
-    const row = document.createElement('div');
-    row.className = 'burn-track-row';
-    row.onclick = () => openBurnModal(item);
-    const ico = document.createElement('div');
-    ico.className = 'burn-track-icon ' + item._kind;
-    ico.textContent = item._kind === 'album' ? '\u266b' : '\u266a';
-    const info = document.createElement('div');
-    info.className = 'burn-track-info';
-    const nm = document.createElement('div');
-    nm.className = 'burn-track-name';
-    nm.textContent = label;
-    const mt = document.createElement('div');
-    mt.className = 'burn-track-meta';
-    const tag = document.createElement('span');
-    tag.className = 'hist-tag';
-    tag.textContent = item.type;
-    mt.appendChild(tag);
-    if (item._kind === 'album') {
-      const cnt = document.createElement('span');
-      cnt.textContent = paths.length + ' tracks';
-      mt.appendChild(cnt);
-    }
-    info.append(nm, mt);
-    const badge = document.createElement('div');
-    badge.className = 'burn-queue-badge' + (inQueue > 0 ? ' active' : '');
-    badge.textContent = inQueue > 0 ? inQueue + '/' + paths.length : '\u2795';
-    row.append(ico, info, badge);
-    container.appendChild(row);
-  });
-}
-
-function renderBurnQueue() {
-  const list = document.getElementById('burnQueueList');
-  const countEl = document.getElementById('burnQueueCount');
-  const n = burnPaths.length;
-  countEl.textContent = n + ' track' + (n !== 1 ? 's' : '');
-  if (n === 0) {
-    list.innerHTML = '<div class="burn-queue-empty">No tracks queued yet.</div>';
-    return;
-  }
-  list.innerHTML = '';
-  burnPaths.forEach((p, i) => {
-    const name = p.split('/').pop().replace(/\.[^.]+$/, '');
-    const item = document.createElement('div');
-    item.className = 'burn-queue-item';
-    const num = document.createElement('span');
-    num.className = 'burn-queue-num';
-    num.textContent = String(i + 1).padStart(2, '0');
-    const lbl = document.createElement('span');
-    lbl.className = 'burn-queue-name';
-    lbl.textContent = name;
-    const rm = document.createElement('button');
-    rm.className = 'burn-queue-rm';
-    rm.textContent = '\u00d7';
-    rm.title = 'Remove';
-    rm.onclick = () => {
-      burnPaths.splice(i, 1);
-      renderBurnQueue();
-      renderBurnTrackList();
-      updateBurnFooter();
-    };
-    item.append(num, lbl, rm);
-    list.appendChild(item);
-  });
-}
-
-function updateBurnFooter() {
-  const n = burnPaths.length;
-  const mins = n * 4;
-  const pct = Math.min((mins / 74) * 100, 100);
-  const fill = document.getElementById('burnCapFill');
-  fill.style.width = pct + '%';
-  fill.className = 'burn-cap-fill' + (mins > 74 ? ' over' : '');
-  document.getElementById('burnCapLabel').textContent = mins + ' / 74 min (est.)';
-  document.getElementById('burnBtn').disabled = n === 0;
-  renderBurnQueue();
-}
-
-function selectAllBurn() {
-  burnPaths = [];
-  [...libData.albums, ...libData.songs].forEach(item => {
-    const paths = item.output_paths && item.output_paths.length > 1
-      ? item.output_paths
-      : [item.output_path || (item.output_paths && item.output_paths[0]) || ''];
-    paths.forEach(p => { if (p && !burnPaths.includes(p)) burnPaths.push(p); });
-  });
-  renderBurnTrackList();
-  updateBurnFooter();
-}
-
-function clearBurnSelection() {
-  burnPaths = [];
-  renderBurnTrackList();
-  updateBurnFooter();
-}
-
-async function doBurn() {
-  if (!burnPaths.length) return;
-  const mode = document.getElementById('burnMode').value;
-  const log = document.getElementById('burnLog');
-  const btn = document.getElementById('burnBtn');
-  log.style.display = 'block';
-  log.textContent = 'Starting burn job…';
-  btn.disabled = true;
-  const headers = {'Content-Type': 'application/json'};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  const res = await fetch('/burn-cd', {
-    method: 'POST', headers,
-    body: JSON.stringify({ paths: burnPaths, mode })
-  });
-  const data = await res.json();
-  if (!res.ok) { log.textContent = data.error || 'Failed to start burn'; btn.disabled = false; return; }
-  activeBurnId = data.burn_id;
-  pollBurn();
-}
-
-async function pollBurn() {
-  if (!activeBurnId) return;
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  const res = await fetch('/burn-status/' + activeBurnId, {headers});
-  const data = await res.json();
-  const log = document.getElementById('burnLog');
-  log.textContent = data.log || '';
-  log.scrollTop = log.scrollHeight;
-  if (data.status === 'done' || data.status === 'error') {
-    document.getElementById('burnBtn').disabled = false;
-    activeBurnId = null;
-    return;
-  }
-  setTimeout(pollBurn, 1500);
-}
-
-async function checkBurner() {
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  try {
-    const res = await fetch('/check-burner', {headers});
-    const data = await res.json();
-    const el = document.getElementById('burnerStatus');
-    el.textContent = data.available ? 'Optical drive detected' : 'No optical drive found';
-    el.style.color = data.available ? '#48c78e' : '#ff6b6b';
-  } catch(e) {}
-}
-
 async function fetchLibrary() {
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  const res = await fetch('/history?limit=500', {headers});
+  const res = await fetch('/history?limit=500');
   if (!res.ok) return;
   const data = await res.json();
   categorizeLibrary(data.items);
@@ -1437,10 +910,7 @@ async function fetchLibrary() {
     localStorage.setItem('yt_lib_cache', JSON.stringify({ts: Date.now(), items: data.items}));
   } catch(e) {}
   renderLibrary();
-  renderBurnTrackList();
-  updateBurnFooter();
 }
-document.getElementById("token").value = savedToken;
 document.querySelectorAll('details').forEach(function(el) {
   el.addEventListener('toggle', function() {
     const chevronId = this.querySelector('summary span[id]').id;
@@ -1459,7 +929,6 @@ document.getElementById('type').addEventListener('change', syncScOptions);
 syncScOptions();
 
 async function start() {
-  if (!IS_LOCAL && !savedToken) { showTokenModal(); return; }
   const url = document.getElementById('url').value.trim();
   if (!url) return;
   if (url.includes('open.spotify.com') || url.includes('spotify.com/')) {
@@ -1473,13 +942,11 @@ async function start() {
   const type = document.getElementById('type').value;
   const scQuality = document.getElementById('scQuality').value;
   const scPlaylist = document.getElementById('scPlaylist').checked;
-  const headers = {'Content-Type':'application/json'};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
   document.getElementById('log').textContent = "Starting\u2026";
   document.getElementById('meta').textContent = "";
   const res = await fetch('/start', {
     method: 'POST',
-    headers,
+    headers: {'Content-Type':'application/json'},
     body: JSON.stringify({url, type, sc_quality: scQuality, sc_playlist: scPlaylist})
   });
   if (!res.ok) {
@@ -1495,9 +962,7 @@ async function start() {
 
 async function poll() {
   if (!currentJob) return;
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  const res = await fetch('/status/' + currentJob, {headers});
+  const res = await fetch('/status/' + currentJob);
   const data = await res.json();
   document.getElementById('log').textContent = data.log || data.status;
   setStatus(data.status, data.queue_position);
@@ -1508,19 +973,19 @@ async function poll() {
     const n = (data.output_paths || []).length;
     let meta = done + '/' + tot + ' tracks';
     if (data.status === 'done' && n > 0) {
-      meta += ' \u2014 <a href="/download/' + currentJob + (savedToken ? '?token=' + encodeURIComponent(savedToken) : '') + '" target="_blank">Download ZIP</a>';
+      meta += ' \u2014 <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>';
     }
     meta += ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View log</a>';
     document.getElementById('meta').innerHTML = meta;
   } else if (data.output_paths && data.output_paths.length > 1) {
     const n = data.output_paths.length;
     document.getElementById('meta').innerHTML =
-      n + ' files \u2014 <a href="/download/' + currentJob + (savedToken ? '?token=' + encodeURIComponent(savedToken) : '') + '" target="_blank">Download ZIP</a>'
+      n + ' files \u2014 <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   } else if (data.file || data.output_path) {
     const name = data.file || data.output_path.split('/').pop();
     document.getElementById('meta').innerHTML =
-      'File: <a href="/download/' + currentJob + (savedToken ? '?token=' + encodeURIComponent(savedToken) : '') + '" target="_blank">' + escHtml(name) + '</a>'
+      'File: <a href="/download/' + currentJob + '" target="_blank">' + escHtml(name) + '</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   }
   if (data.status === "done") {
@@ -1601,17 +1066,6 @@ function resetUI() {
   setStatus('idle', null);
 }
 
-function saveToken() {
-  savedToken = document.getElementById('token').value.trim();
-  sessionStorage.setItem("yt_token", savedToken);
-}
-
-async function openFolder() {
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  await fetch('/open-folder', {headers});
-}
-
 function setStatus(status, queuePos) {
   const pill = document.getElementById('statusPill');
   const pos = document.getElementById('queuePos');
@@ -1631,11 +1085,9 @@ function setStatus(status, queuePos) {
 
 async function cancel() {
   if (!currentJob) return;
-  const headers = {'Content-Type':'application/json'};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
   await fetch('/cancel', {
     method: 'POST',
-    headers,
+    headers: {'Content-Type':'application/json'},
     body: JSON.stringify({job_id: currentJob})
   });
   poll();
@@ -1663,35 +1115,19 @@ function buildHistoryList(items) {
     const right = document.createElement('div');
     right.className = 'hist-btns';
     if (multi) {
-      if (IS_LOCAL) {
-        const revealBtn = document.createElement('button');
-        revealBtn.className = 'hist-btn';
-        revealBtn.textContent = 'Reveal';
-        revealBtn.onclick = () => reveal(item.output_paths[0]);
-        right.appendChild(revealBtn);
-      }
       if (item.job_id) {
         const zipBtn = document.createElement('button');
         zipBtn.className = 'hist-btn';
         zipBtn.textContent = 'ZIP';
-        zipBtn.onclick = () => { window.location.href = '/download/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
+        zipBtn.onclick = () => { window.location.href = '/download/' + item.job_id; };
         right.appendChild(zipBtn);
       }
-    } else {
-      if (IS_LOCAL) {
-        const btn = document.createElement('button');
-        btn.className = 'hist-btn';
-        btn.textContent = 'Reveal';
-        btn.onclick = () => reveal(item.output_path);
-        right.appendChild(btn);
-      }
-      if (!IS_LOCAL && item.job_id) {
-        const dlBtn = document.createElement('button');
-        dlBtn.className = 'hist-btn';
-        dlBtn.textContent = 'Download';
-        dlBtn.onclick = () => { window.location.href = '/file/' + item.job_id + (savedToken ? '?token=' + encodeURIComponent(savedToken) : ''); };
-        right.appendChild(dlBtn);
-      }
+    } else if (item.job_id) {
+      const dlBtn = document.createElement('button');
+      dlBtn.className = 'hist-btn';
+      dlBtn.textContent = 'Download';
+      dlBtn.onclick = () => { window.location.href = '/file/' + item.job_id; };
+      right.appendChild(dlBtn);
     }
     row.appendChild(left);
     row.appendChild(right);
@@ -1701,9 +1137,7 @@ function buildHistoryList(items) {
 }
 
 async function fetchHistory() {
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  const res = await fetch('/history?limit=5', {headers});
+  const res = await fetch('/history?limit=5');
   if (!res.ok) return;
   const data = await res.json();
   const container = document.getElementById('historyPreview');
@@ -1718,9 +1152,7 @@ async function fetchHistory() {
 }
 
 async function fetchFullHistory() {
-  const headers = {};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  const res = await fetch('/history?limit=500', {headers});
+  const res = await fetch('/history?limit=500');
   if (!res.ok) return;
   const data = await res.json();
   const container = document.getElementById('history');
@@ -1732,36 +1164,15 @@ async function fetchFullHistory() {
   }
 }
 
-async function reveal(path) {
-  if (!path) {
-    openFolder();
-    return;
-  }
-  const headers = {'Content-Type':'application/json'};
-  if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
-  await fetch('/reveal', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({path})
-  });
-}
-
-if (!IS_LOCAL) {
-  document.querySelectorAll('.right-col .card').forEach(c => c.style.display = 'none');
-}
-
 fetchHistory();
 try {
   const cached = JSON.parse(localStorage.getItem('yt_lib_cache') || 'null');
   if (cached && cached.items) {
     categorizeLibrary(cached.items);
     renderLibrary();
-    renderBurnTrackList();
-    updateBurnFooter();
   }
 } catch(e) {}
 fetchLibrary();
-checkBurner();
 </script>
 
 <footer style="text-align:center; padding:24px 16px 20px; font-size:12px; color:#555;">
@@ -1811,21 +1222,6 @@ checkBurner();
 </body>
 </html>
 """
-
-def require_auth():
-    if not VALID_TOKENS:
-        host = request.host.split(":")[0].lower().strip("[]")
-        if host not in _LOCAL_HOSTS:
-            abort(403)
-        return
-    header = request.headers.get("Authorization", "")
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() == "bearer" and token in VALID_TOKENS:
-        return
-    qs_token = request.args.get("token", "")
-    if qs_token in VALID_TOKENS:
-        return
-    abort(401)
 
 def is_valid_url(url: str) -> bool:
     if not url:
@@ -1896,6 +1292,35 @@ def dispatcher():
 def cleanup_worker():
     while True:
         time.sleep(30)
+
+        # File TTL: delete downloaded files first so job metadata still points at them
+        if FILE_TTL_DAYS > 0:
+            file_cutoff = datetime.utcnow() - timedelta(days=FILE_TTL_DAYS)
+            with jobs_lock:
+                snapshot = list(jobs.values())
+            for job in snapshot:
+                finished = job.get("finished_at")
+                if finished and finished < file_cutoff:
+                    for p in (job.get("output_paths") or [job.get("output_path")]):
+                        if p and os.path.exists(p):
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
+
+            # Orphan sweep: any file in DOWNLOAD_DIR older than TTL, regardless of jobs state
+            ttl_seconds = FILE_TTL_DAYS * 86400
+            now_ts = time.time()
+            for root, _dirs, files in os.walk(DOWNLOAD_DIR):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    try:
+                        if now_ts - os.path.getmtime(fp) > ttl_seconds:
+                            os.remove(fp)
+                    except OSError:
+                        pass
+
+        # Job TTL: prune expired job records
         cutoff = datetime.utcnow() - timedelta(seconds=JOB_TTL_SECONDS)
         removed = False
         with jobs_lock:
@@ -1910,21 +1335,6 @@ def cleanup_worker():
                 pass
         if removed:
             save_jobs()
-
-        # File TTL: delete actual downloaded files on a separate, independent schedule
-        if FILE_TTL_DAYS > 0:
-            file_cutoff = datetime.utcnow() - timedelta(days=FILE_TTL_DAYS)
-            with jobs_lock:
-                snapshot = list(jobs.values())
-            for job in snapshot:
-                finished = job.get("finished_at")
-                if finished and finished < file_cutoff:
-                    for p in (job.get("output_paths") or [job.get("output_path")]):
-                        if p and os.path.exists(p):
-                            try:
-                                os.remove(p)
-                            except OSError:
-                                pass
 
 def load_history() -> list:
     if not HISTORY_PATH.exists():
@@ -1967,15 +1377,6 @@ def save_jobs():
 
 def job_log_path(job_id: str) -> Path:
     return LOG_DIR / f"{job_id}.log"
-
-def open_download_folder(select_path: str | None = None):
-    try:
-        if select_path and Path(select_path).exists():
-            subprocess.Popen(["open", "-R", select_path])
-        else:
-            subprocess.Popen(["open", DOWNLOAD_DIR])
-    except Exception:
-        pass
 
 def _parse_dt(val):
     if isinstance(val, datetime):
@@ -2184,6 +1585,8 @@ def run_job(job_id: str):
     with jobs_lock:
         job = jobs.get(job_id)
         if not job or job.get("status") != "queued":
+            if job:
+                _release_ip(job.get("client_ip"))
             job_sema.release()
             return
         job["status"] = "running"
@@ -2193,11 +1596,13 @@ def run_job(job_id: str):
         sc_playlist = job.get("sc_playlist", True)
         spotify_info = job.get("spotify_info") or {}
         apple_music_info = job.get("apple_music_info") or {}
+        client_ip_val = job.get("client_ip")
         save_jobs()
     if not url:
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["log"] = "Missing URL"
+        _release_ip(client_ip_val)
         job_sema.release()
         return
 
@@ -2613,18 +2018,12 @@ def run_job(job_id: str):
             sc_quality_val = jobs[job_id].get("sc_quality", "m4a")
             sc_playlist_val = jobs[job_id].get("sc_playlist", True)
             failures_val = jobs[job_id].get("failures", [])
+            ip_val = jobs[job_id].get("client_ip")
             jobs[job_id].pop("process", None)
             jobs[job_id].pop("cancel_requested", None)
             save_jobs()
         job_sema.release()
-        # open folder once on success
-        if status_val == "done":
-            with jobs_lock:
-                already_opened = jobs[job_id].get("opened_folder", False)
-                if not already_opened:
-                    jobs[job_id]["opened_folder"] = True
-            if not already_opened:
-                open_download_folder(output_val or (os.path.join(DOWNLOAD_DIR, file_val) if file_val else None))
+        _release_ip(ip_val)
         # history record
         record = {
             "job_id": job_id,
@@ -2652,13 +2051,10 @@ def run_job(job_id: str):
 
 @app.get("/")
 def index():
-    host = request.host.split(":")[0]
-    is_local = host in ("localhost", "127.0.0.1", "::1")
-    return render_template_string(HTML, download_dir=DOWNLOAD_DIR, version=VERSION, is_local=is_local)
+    return render_template_string(HTML, version=VERSION)
 
 @app.post("/start")
 def start():
-    require_auth()
     data = request.get_json() or {}
     url = (data.get("url") or "").strip()
     job_type = (data.get("type") or "video").strip().lower()
@@ -2696,6 +2092,23 @@ def start():
         if not apple_music_info.get("tracks"):
             return jsonify({"error": "No tracks found in Apple Music URL."}), 400
 
+    track_count = len((spotify_info or apple_music_info or {}).get("tracks", []))
+    if track_count > MAX_PLAYLIST_TRACKS:
+        return jsonify({"error": f"Playlist too large ({track_count} tracks). Limit is {MAX_PLAYLIST_TRACKS}."}), 400
+
+    if DISK_CAP_GB > 0:
+        try:
+            used_gb = _disk_usage_gb(DOWNLOAD_DIR)
+            if used_gb >= DISK_CAP_GB:
+                return jsonify({"error": "Server storage is full. Try again later."}), 503
+        except Exception:
+            pass
+
+    ip = _client_ip()
+    err, code = _check_ip_limits(ip)
+    if err:
+        return jsonify({"error": err}), code
+
     prune_jobs()
     job_id = str(uuid.uuid4())
     with jobs_lock:
@@ -2714,15 +2127,17 @@ def start():
             "spotify_info": spotify_info,
             "apple_music_info": apple_music_info,
             "current_index": 0,
-            "total_items": len((spotify_info or apple_music_info or {}).get("tracks", [])),
+            "total_items": track_count,
             "progress_pct": 0,
             "failures": [],
+            "client_ip": ip,
         }
         save_jobs()
     with queue_cv:
         if len(job_queue) >= MAX_QUEUE_DEPTH:
             with jobs_lock:
                 jobs.pop(job_id, None)
+            _release_ip(ip)
             return jsonify({"error": "Queue is full. Try again later."}), 429
         job_queue.append(job_id)
         queue_cv.notify()
@@ -2730,7 +2145,6 @@ def start():
 
 @app.get("/status/<job_id>")
 def status(job_id):
-    require_auth()
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -2743,7 +2157,6 @@ def status(job_id):
 
 @app.get("/download/<job_id>")
 def download(job_id):
-    require_auth()
     with jobs_lock:
         job = jobs.get(job_id)
     if not job:
@@ -2787,7 +2200,6 @@ def download(job_id):
 
 @app.get("/file/<job_id>")
 def download_single(job_id):
-    require_auth()
     with jobs_lock:
         job = jobs.get(job_id)
     if not job:
@@ -2797,15 +2209,8 @@ def download_single(job_id):
         abort(404)
     return send_file(path, as_attachment=True)
 
-@app.get("/open-folder")
-def open_folder():
-    require_auth()
-    open_download_folder()
-    return jsonify({"status": "ok"})
-
 @app.get("/history")
 def history():
-    require_auth()
     limit = int(request.args.get("limit", "10"))
     items = load_history()[-limit:]
     host = request.host.split(":")[0].lower().strip("[]")
@@ -2817,23 +2222,8 @@ def history():
                 item["output_paths"] = [os.path.basename(p) for p in item["output_paths"] if p]
     return jsonify({"items": items[::-1]})
 
-@app.post("/reveal")
-def reveal():
-    require_auth()
-    data = request.get_json() or {}
-    path = (data.get("path") or "").strip()
-    if path:
-        abs_dl   = os.path.abspath(DOWNLOAD_DIR)
-        abs_path = os.path.abspath(path)
-        if (abs_path == abs_dl or abs_path.startswith(abs_dl + os.sep)) and Path(abs_path).exists():
-            open_download_folder(abs_path)
-            return jsonify({"status": "ok", "opened": abs_path})
-    open_download_folder()
-    return jsonify({"status": "ok", "opened": DOWNLOAD_DIR})
-
 @app.post("/cancel")
 def cancel():
-    require_auth()
     data = request.get_json() or {}
     job_id = (data.get("job_id") or "").strip()
     if not job_id:
@@ -2865,7 +2255,6 @@ def cancel():
 
 @app.get("/job-log/<job_id>")
 def job_log(job_id):
-    require_auth()
     tail = request.args.get("tail", "200")
     path = job_log_path(job_id)
     if not path.exists():
@@ -2881,111 +2270,11 @@ def job_log(job_id):
 
 @app.get("/health")
 def health():
-    require_auth()
     with jobs_lock:
         running = sum(1 for j in jobs.values() if j.get("status") == "running")
     with queue_cv:
         qlen = len(job_queue)
     return jsonify({"queue_length": qlen, "running": running, "version": VERSION})
-
-# ── CD Burning ────────────────────────────────────────────────────────────────
-
-def _do_burn(burn_id: str, paths: list, mode: str):
-    """Background worker: converts files (if audio CD) and calls drutil burn."""
-    tmpdir = tempfile.mkdtemp(prefix="ytui_burn_")
-    log_lines = []
-
-    def log(msg):
-        log_lines.append(msg)
-        with burn_lock:
-            burn_jobs[burn_id]["log"] = "\n".join(log_lines[-80:])
-
-    try:
-        if mode == "audio":
-            log("Converting tracks to AIFF (audio CD format)…")
-            src_files = []
-            for i, src in enumerate(paths):
-                name = os.path.splitext(os.path.basename(src))[0]
-                dst = os.path.join(tmpdir, f"{i+1:02d} {name}.aiff")
-                log(f"  [{i+1}/{len(paths)}] {os.path.basename(src)}")
-                r = subprocess.run(
-                    ["afconvert", "-f", "AIFF", "-d", "LEI16@44100", "-c", "2", src, dst],
-                    capture_output=True, text=True, timeout=180,
-                )
-                if r.returncode != 0:
-                    log(f"    Warning: {r.stderr.strip()}")
-                else:
-                    src_files.append(dst)
-            burn_cmd = ["drutil", "burn", "-audio", "-noeject", tmpdir]
-        else:
-            log("Staging files for data CD…")
-            for src in paths:
-                dst = os.path.join(tmpdir, os.path.basename(src))
-                shutil.copy2(src, dst)
-                log(f"  Copied: {os.path.basename(src)}")
-            burn_cmd = ["drutil", "burn", "-data", "-noeject", tmpdir]
-
-        log("Insert a blank CD if not already present…")
-        log("Burning — this may take a few minutes…")
-        with burn_lock:
-            burn_jobs[burn_id]["status"] = "burning"
-        r = subprocess.run(burn_cmd, capture_output=True, text=True, timeout=900)
-        if r.stdout.strip():
-            log(r.stdout.strip())
-        if r.returncode == 0:
-            log("✓ Burn complete!")
-            with burn_lock:
-                burn_jobs[burn_id]["status"] = "done"
-        else:
-            log(f"✗ drutil error:\n{r.stderr.strip()}")
-            with burn_lock:
-                burn_jobs[burn_id]["status"] = "error"
-    except Exception as e:
-        log(f"Exception: {e}")
-        with burn_lock:
-            burn_jobs[burn_id]["status"] = "error"
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-@app.get("/check-burner")
-def check_burner():
-    require_auth()
-    try:
-        r = subprocess.run(["drutil", "list"], capture_output=True, text=True, timeout=5)
-        lines = [l.strip() for l in r.stdout.splitlines() if l.strip()]
-        available = any(str(i) in r.stdout for i in range(1, 10))
-        return jsonify({"available": available, "info": "\n".join(lines)})
-    except Exception as e:
-        return jsonify({"available": False, "info": str(e)})
-
-
-@app.post("/burn-cd")
-def burn_cd_route():
-    require_auth()
-    data = request.get_json() or {}
-    paths = [p for p in (data.get("paths") or [])
-             if isinstance(p, str) and os.path.isfile(p) and os.path.abspath(p).startswith(os.path.abspath(DOWNLOAD_DIR))]
-    if not paths:
-        return jsonify({"error": "No valid files found in download directory"}), 400
-    mode = data.get("mode", "data")
-    if mode not in {"data", "audio"}:
-        mode = "data"
-    burn_id = str(uuid.uuid4())
-    with burn_lock:
-        burn_jobs[burn_id] = {"status": "running", "log": "Starting…", "mode": mode, "total": len(paths)}
-    threading.Thread(target=_do_burn, args=(burn_id, paths, mode), daemon=True).start()
-    return jsonify({"burn_id": burn_id})
-
-
-@app.get("/burn-status/<burn_id>")
-def burn_status(burn_id):
-    require_auth()
-    with burn_lock:
-        job = burn_jobs.get(burn_id)
-    if not job:
-        return jsonify({"error": "Unknown burn job"}), 404
-    return jsonify(job)
 
 @app.get("/admin")
 def admin_page():
@@ -3074,62 +2363,5 @@ cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
 cleanup_thread.start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Local yt-dlp UI")
-    parser.add_argument("--menubar", action="store_true", help="Run macOS menu bar tray (requires rumps)")
-    args = parser.parse_args()
-    menubar_env = os.environ.get("YT_UI_MENUBAR", "").lower() in {"1", "true", "yes"}
-    is_frozen = getattr(sys, "frozen", False)
-
-    def run_flask():
-        host = os.environ.get("FLASK_HOST", "127.0.0.1")
-        app.run(host=host, port=5055, debug=False, use_reloader=False)
-
-    run_tray = args.menubar or menubar_env
-
-    if is_frozen:
-        # If a server is already running on 5055, just open the browser and exit
-        _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _already_running = _probe.connect_ex(("127.0.0.1", 5055)) == 0
-        _probe.close()
-        if _already_running:
-            webbrowser.open("http://127.0.0.1:5055")
-        else:
-            # Dock app: open browser automatically after Flask starts, then serve
-            def _open_browser():
-                time.sleep(1.5)
-                webbrowser.open("http://127.0.0.1:5055")
-            threading.Thread(target=_open_browser, daemon=True).start()
-            run_flask()
-    elif run_tray:
-        try:
-            import rumps  # type: ignore
-        except ImportError:
-            print("rumps not installed. Install with: pip install rumps (macOS only)")
-            raise SystemExit(1)
-
-        # start flask in background
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-
-        class Tray(rumps.App):
-            def __init__(self):
-                super().__init__("YT", quit_button=None)
-                self.menu = [
-                    rumps.MenuItem("Open UI", callback=self.open_ui),
-                    rumps.MenuItem("Open Downloads Folder", callback=self.open_dl),
-                    None,
-                    rumps.MenuItem("Quit", callback=self.quit_app),
-                ]
-
-            def open_ui(self, _):
-                webbrowser.open("http://127.0.0.1:5055")
-
-            def open_dl(self, _):
-                open_download_folder()
-
-            def quit_app(self, _):
-                rumps.quit_application()
-
-        Tray().run()
-    else:
-        run_flask()
+    host = os.environ.get("FLASK_HOST", "127.0.0.1")
+    app.run(host=host, port=5055, debug=False, use_reloader=False)
