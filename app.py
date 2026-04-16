@@ -711,6 +711,8 @@ HTML = """
   <header class="header">
     <span class="logo">+downloads</span>
     <span class="version-badge">v{{version}}</span>
+    <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20Bug%20Report" style="margin-left:auto; color:#555; font-size:12px; font-weight:600; text-decoration:none; padding:6px 12px; border:1px solid #353333; border-radius:8px; transition:color 0.15s, border-color 0.15s;" onmouseover="this.style.color='#f0eef0';this.style.borderColor='#555'" onmouseout="this.style.color='#555';this.style.borderColor='#353333'">Bug Report</a>
+    <a href="https://joshuaisaiah.art/payment/tip/573083b1f69f451c903db55d1a22ef2b" target="_blank" rel="noopener noreferrer" style="color:#1a1818; font-size:12px; font-weight:700; text-decoration:none; padding:6px 14px; background:#bf9b3a; border-radius:8px; transition:background 0.15s;" onmouseover="this.style.background='#d4ad42'" onmouseout="this.style.background='#bf9b3a'">Tip Jar</a>
   </header>
   <main class="main">
   <div class="left-col">
