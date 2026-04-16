@@ -139,7 +139,6 @@ _COOKIE_ERROR_PATTERNS = [
 
 
 def _check_cookie_alert(log_output: str):
-    """Send an email alert if yt-dlp output indicates cookie problems. Max once per 24h."""
     global _last_cookie_alert
     if not SMTP_USER or not SMTP_PASS or not ALERT_EMAIL:
         return
@@ -324,6 +323,7 @@ ADMIN_HTML = """
       <div class="btn-row">
         <button class="btn" id="upload-btn" onclick="uploadCookies()">Upload</button>
         <button class="btn-outline" onclick="loadStats()">Load Stats</button>
+        <button class="btn-outline" onclick="clearHistory()" style="border-color:#e74c3c;color:#e74c3c">Clear History</button>
       </div>
       <div id="upload-msg"></div>
     </div>
@@ -431,6 +431,24 @@ ADMIN_HTML = """
         const d = await r.json();
         if (!r.ok) { msg.textContent = d.error || 'Error loading stats.'; msg.className = 'err'; return; }
         msg.textContent = ''; renderStats(d);
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+    }
+
+    async function clearHistory() {
+      const msg = document.getElementById('upload-msg');
+      if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
+      if (!confirm('Clear all download history? This cannot be undone.')) return;
+      msg.textContent = 'Clearing…'; msg.className = '';
+      try {
+        const r = await fetch('/admin/clear-history', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({password: pw()})
+        });
+        const j = await r.json();
+        if (!r.ok) { msg.textContent = j.error || 'Error clearing history.'; msg.className = 'err'; return; }
+        msg.textContent = 'History cleared.'; msg.className = 'ok';
+        loadStats();
       } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
     }
 
@@ -2436,6 +2454,18 @@ def admin_stats():
         "recent": history[-50:][::-1],
         "active_jobs": active_jobs,
     })
+
+
+@app.post("/admin/clear-history")
+def admin_clear_history():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    data = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump([], f)
+    return jsonify({"ok": True, "message": "History cleared"})
 
 
 @app.before_request
