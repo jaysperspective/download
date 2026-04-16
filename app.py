@@ -52,10 +52,12 @@ PER_IP_CONCURRENT = int(os.environ.get("YT_UI_PER_IP_CONCURRENT", "2"))
 PER_IP_HOURLY = int(os.environ.get("YT_UI_PER_IP_HOURLY", "20"))
 MAX_PLAYLIST_TRACKS = int(os.environ.get("YT_UI_MAX_PLAYLIST_TRACKS", "50"))
 DISK_CAP_GB = float(os.environ.get("YT_UI_DISK_CAP_GB", "20"))
+GLOBAL_RATE_PER_MIN = int(os.environ.get("YT_UI_GLOBAL_RATE_PER_MIN", "120"))
 _ip_jobs_active: dict = {}
 _ip_recent: dict = {}
 _ip_lock = threading.Lock()
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_global_rate: dict = {}
+_global_rate_lock = threading.Lock()
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 _spotify_token_cache: dict = {}
@@ -73,9 +75,9 @@ queue_cv = threading.Condition()
 
 
 def _client_ip() -> str:
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP", "")
+    if real_ip:
+        return real_ip.strip()
     return request.remote_addr or "unknown"
 
 
@@ -118,6 +120,14 @@ def _release_ip(ip: str):
             _ip_jobs_active.pop(ip, None)
         else:
             _ip_jobs_active[ip] = current - 1
+
+
+def _is_safe_path(path: str) -> bool:
+    try:
+        return os.path.realpath(path).startswith(os.path.realpath(DOWNLOAD_DIR))
+    except (ValueError, OSError):
+        return False
+
 
 ADMIN_HTML = """
 <!doctype html>
@@ -1338,6 +1348,26 @@ def cleanup_worker():
         if removed:
             save_jobs()
 
+        # Sweep stale IP tracking entries (#14)
+        with _ip_lock:
+            stale_ips = [ip for ip, ts in _ip_recent.items() if not ts or ts[-1] < time.time() - 3600]
+            for ip in stale_ips:
+                _ip_recent.pop(ip, None)
+                _ip_jobs_active.pop(ip, None)
+        with _global_rate_lock:
+            stale_gr = [ip for ip, ts in _global_rate.items() if not ts or ts[-1] < time.time() - 120]
+            for ip in stale_gr:
+                _global_rate.pop(ip, None)
+
+        # Clean empty subdirectories (#15)
+        if FILE_TTL_DAYS > 0:
+            for root, dirs, files in os.walk(DOWNLOAD_DIR, topdown=False):
+                if root != DOWNLOAD_DIR and not os.listdir(root):
+                    try:
+                        os.rmdir(root)
+                    except OSError:
+                        pass
+
 def load_history() -> list:
     if not HISTORY_PATH.exists():
         return []
@@ -1391,7 +1421,9 @@ def _parse_dt(val):
     return None
 
 def _sanitize_metadata(s: str) -> str:
-    return re.sub(r'[\x00\n\r\t]', ' ', str(s or '')).replace('"', "'")
+    cleaned = re.sub(r'[\x00\n\r\t]', ' ', str(s or ''))
+    cleaned = re.sub(r'["`$\\]', "'", cleaned)
+    return cleaned
 
 def detect_spotify(url: str) -> bool:
     try:
@@ -1609,7 +1641,7 @@ def run_job(job_id: str):
         return
 
     cookies_args = []
-    if COOKIES_PATH and os.path.exists(COOKIES_PATH):
+    if COOKIES_PATH and os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 10:
         cookies_args = ["--cookies", COOKIES_PATH]
 
     if job_type == "audio":
@@ -2152,7 +2184,7 @@ def status(job_id):
         if not job:
             return jsonify({"status": "unknown", "log": "No such job"})
         # return a shallow copy, excluding non-serializable internals
-        payload = {k: v for k, v in job.items() if k not in ("process", "cancel_requested", "spotify_info", "apple_music_info")}
+        payload = {k: v for k, v in job.items() if k not in ("process", "cancel_requested", "spotify_info", "apple_music_info", "client_ip")}
         payload["log"] = job.get("log", "")
     payload["queue_position"] = queue_position(job_id)
     return jsonify(payload)
@@ -2165,9 +2197,12 @@ def download(job_id):
         abort(404)
 
     output_paths = job.get("output_paths") or []
-    existing = [p for p in output_paths if p and os.path.exists(p)]
+    existing = [p for p in output_paths if p and os.path.exists(p) and _is_safe_path(p)]
 
     if len(existing) > 1:
+        total_size = sum(os.path.getsize(p) for p in existing)
+        if total_size > 2 * 1024 * 1024 * 1024:
+            abort(413)
         first_dir = os.path.dirname(existing[0])
         zip_name = (os.path.basename(first_dir) or "soundcloud_download") + ".zip"
         tmp_dir = tempfile.mkdtemp()
@@ -2194,10 +2229,12 @@ def download(job_id):
     if not job.get("file") and not job.get("output_path"):
         abort(404)
     target_path = job.get("output_path") or os.path.join(DOWNLOAD_DIR, job["file"])
-    if target_path and os.path.exists(target_path):
+    if target_path and os.path.exists(target_path) and _is_safe_path(target_path):
         return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path), as_attachment=True)
     if job.get("file"):
-        return send_from_directory(DOWNLOAD_DIR, job["file"], as_attachment=True)
+        candidate = os.path.join(DOWNLOAD_DIR, os.path.basename(job["file"]))
+        if os.path.exists(candidate) and _is_safe_path(candidate):
+            return send_from_directory(DOWNLOAD_DIR, os.path.basename(job["file"]), as_attachment=True)
     abort(404)
 
 @app.get("/file/<job_id>")
@@ -2207,21 +2244,22 @@ def download_single(job_id):
     if not job:
         abort(404)
     path = job.get("output_path") or (job.get("output_paths") or [None])[0]
-    if not path or not os.path.exists(path):
+    if not path or not os.path.exists(path) or not _is_safe_path(path):
         abort(404)
     return send_file(path, as_attachment=True)
 
 @app.get("/history")
 def history():
-    limit = int(request.args.get("limit", "10"))
+    try:
+        limit = int(request.args.get("limit", "10"))
+    except ValueError:
+        limit = 10
     items = load_history()[-limit:]
-    host = request.host.split(":")[0].lower().strip("[]")
-    if host not in _LOCAL_HOSTS:
-        for item in items:
-            if item.get("output_path"):
-                item["output_path"] = os.path.basename(item["output_path"])
-            if item.get("output_paths"):
-                item["output_paths"] = [os.path.basename(p) for p in item["output_paths"] if p]
+    for item in items:
+        if item.get("output_path"):
+            item["output_path"] = os.path.basename(item["output_path"])
+        if item.get("output_paths"):
+            item["output_paths"] = [os.path.basename(p) for p in item["output_paths"] if p]
     return jsonify({"items": items[::-1]})
 
 @app.post("/cancel")
@@ -2244,6 +2282,7 @@ def cancel():
         if removed:
             job["status"] = "cancelled"
             job["log"] = "Cancelled before start"
+            _release_ip(job.get("client_ip"))
         elif job.get("status") == "running":
             proc = job.get("process")
             job["cancel_requested"] = True
@@ -2257,6 +2296,8 @@ def cancel():
 
 @app.get("/job-log/<job_id>")
 def job_log(job_id):
+    if not re.fullmatch(r'[0-9a-f\-]{36}', job_id):
+        abort(400)
     tail = request.args.get("tail", "200")
     path = job_log_path(job_id)
     if not path.exists():
@@ -2343,14 +2384,31 @@ def admin_stats():
     })
 
 
+@app.before_request
+def _global_rate_limit():
+    if request.path.startswith(('/status/', '/health', '/static/')):
+        return
+    ip = _client_ip()
+    now = time.time()
+    minute_ago = now - 60
+    with _global_rate_lock:
+        timestamps = _global_rate.setdefault(ip, deque())
+        while timestamps and timestamps[0] < minute_ago:
+            timestamps.popleft()
+        if len(timestamps) >= GLOBAL_RATE_PER_MIN:
+            return jsonify({"error": "Too many requests. Slow down."}), 429
+        timestamps.append(now)
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
-        "connect-src 'self'"
+        "script-src 'self' 'unsafe-inline' https://pagead2.googlesyndication.com https://www.googletagservices.com; "
+        "img-src 'self' data: https://pagead2.googlesyndication.com; "
+        "frame-src https://googleads.g.doubleclick.net https://tpc.googlesyndication.com; "
+        "connect-src 'self' https://pagead2.googlesyndication.com"
     )
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
