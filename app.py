@@ -58,6 +58,7 @@ GLOBAL_RATE_PER_MIN = int(os.environ.get("YT_UI_GLOBAL_RATE_PER_MIN", "120"))
 SMTP_USER = os.environ.get("YT_UI_SMTP_USER", "")
 SMTP_PASS = os.environ.get("YT_UI_SMTP_PASS", "")
 ALERT_EMAIL = os.environ.get("YT_UI_ALERT_EMAIL", "")
+PROXY_URL = os.environ.get("YT_UI_PROXY", "")
 _ip_jobs_active: dict = {}
 _ip_recent: dict = {}
 _ip_lock = threading.Lock()
@@ -1711,6 +1712,7 @@ def run_job(job_id: str):
     cookies_args = []
     if COOKIES_PATH and os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 10:
         cookies_args = ["--cookies", COOKIES_PATH]
+    proxy_args = ["--proxy", PROXY_URL] if PROXY_URL else []
 
     if job_type == "audio":
         cmd = [
@@ -1771,7 +1773,7 @@ def run_job(job_id: str):
     output_path = None  # backward-compat: last detected path
     last_file = None
     log_file = None
-    cmd = cmd[:1] + cookies_args + cmd[1:]
+    cmd = cmd[:1] + cookies_args + proxy_args + cmd[1:]
 
     try:
         log_file = job_log_path(job_id).open("a", encoding="utf-8")
@@ -1819,7 +1821,7 @@ def run_job(job_id: str):
                     "--print", "after_move:filepath",
                     "-o", out_template,
                 ]
-                track_cmd = track_cmd[:1] + cookies_args + track_cmd[1:]
+                track_cmd = track_cmd[:1] + cookies_args + proxy_args + track_cmd[1:]
                 try:
                     p = subprocess.Popen(track_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                     with jobs_lock:
@@ -1930,7 +1932,7 @@ def run_job(job_id: str):
                     "--print", "after_move:filepath",
                     "-o", out_template,
                 ]
-                track_cmd = track_cmd[:1] + cookies_args + track_cmd[1:]
+                track_cmd = track_cmd[:1] + cookies_args + proxy_args + track_cmd[1:]
                 try:
                     p = subprocess.Popen(track_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                     with jobs_lock:
