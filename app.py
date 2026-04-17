@@ -40,6 +40,7 @@ _data_dir.mkdir(parents=True, exist_ok=True)
 
 HISTORY_PATH = _data_dir / "history.json"
 JOBS_PATH    = _data_dir / "jobs.json"
+PAUSE_PATH   = _data_dir / "pause.json"
 LOG_DIR      = _data_dir / "job-logs"
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -70,6 +71,18 @@ SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 _spotify_token_cache: dict = {}
 _spotify_token_lock = threading.Lock()
+
+def _load_paused() -> bool:
+    try:
+        return bool(json.loads(PAUSE_PATH.read_text()).get("paused", False))
+    except Exception:
+        return False
+
+def _save_paused(val: bool):
+    PAUSE_PATH.write_text(json.dumps({"paused": val}))
+
+_service_paused: bool = _load_paused()
+_pause_lock = threading.Lock()
 
 YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
@@ -329,6 +342,15 @@ ADMIN_HTML = """
       <div id="upload-msg"></div>
     </div>
 
+    <div class="card">
+      <div class="card-title">Service Control</div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div id="pause-status" style="font-size:14px;font-weight:600;color:#888">Status: unknown</div>
+        <button class="btn" id="pause-btn" onclick="togglePause()" style="flex:none;padding:10px 22px">Toggle Pause</button>
+      </div>
+      <div id="pause-msg" style="margin-top:10px;font-size:13px;font-weight:600;min-height:16px"></div>
+    </div>
+
     <div id="stats-section">
       <div class="refresh-row">
         <button class="refresh-btn" onclick="loadStats()">&#8635; Refresh</button>
@@ -434,6 +456,40 @@ ADMIN_HTML = """
         msg.textContent = ''; renderStats(d);
       } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
     }
+
+    async function loadPauseStatus() {
+      try {
+        const r = await fetch('/service-status');
+        const d = await r.json();
+        const el = document.getElementById('pause-status');
+        if (d.paused) {
+          el.textContent = 'Status: PAUSED'; el.style.color = '#e05c5c';
+        } else {
+          el.textContent = 'Status: ACTIVE'; el.style.color = '#4caf7d';
+        }
+      } catch (e) {}
+    }
+
+    async function togglePause() {
+      const msg = document.getElementById('pause-msg');
+      if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
+      const cur = document.getElementById('pause-status').textContent;
+      const newPaused = !cur.includes('PAUSED');
+      try {
+        const r = await fetch('/admin/pause', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({password: pw(), paused: newPaused})
+        });
+        const d = await r.json();
+        if (!r.ok) { msg.textContent = d.error || 'Error.'; msg.className = 'err'; return; }
+        msg.textContent = d.paused ? 'Service paused.' : 'Service resumed.';
+        msg.className = d.paused ? 'err' : 'ok';
+        loadPauseStatus();
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+    }
+
+    loadPauseStatus();
 
     async function clearHistory() {
       const msg = document.getElementById('upload-msg');
@@ -705,6 +761,24 @@ HTML = """
       white-space: nowrap; transition: color 0.15s, border-color 0.15s;
     }
     .hist-btn:hover { color: #db52a6; border-color: #db52a6; }
+    /* Paused banner */
+    .paused-banner {
+      display: none; background: #2a1a1a; border: 1.5px solid #e05c5c;
+      border-radius: 14px; padding: 18px 22px; margin-bottom: 16px;
+      text-align: center;
+    }
+    .paused-banner h2 {
+      font-size: 16px; font-weight: 800; color: #e05c5c; margin-bottom: 6px;
+    }
+    .paused-banner p {
+      font-size: 13px; color: #aaa; margin-bottom: 14px; line-height: 1.5;
+    }
+    .btn-get-app {
+      display: inline-block; background: #db52a6; color: #fff;
+      padding: 11px 24px; border-radius: 10px; font-size: 14px; font-weight: 700;
+      text-decoration: none; transition: background 0.15s;
+    }
+    .btn-get-app:hover { background: #c9479a; }
     /* Library panel */
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -749,6 +823,11 @@ HTML = """
   </header>
   <main class="main">
   <div class="left-col">
+    <div class="paused-banner" id="paused-banner">
+      <h2>Service Temporarily Paused</h2>
+      <p>The web service is currently unavailable. For unlimited, uninterrupted downloads, get the full +downloads app.</p>
+      <a class="btn-get-app" href="https://digitaldownloads.space/app" target="_blank" rel="noopener noreferrer">Get the Full Version</a>
+    </div>
     <div class="card">
       <div class="url-row">
         <input id="url" type="text" placeholder="Paste YouTube, Spotify, or Apple Music URL here" />
@@ -817,6 +896,24 @@ HTML = """
 <script>
 let currentJob = null;
 
+async function checkPaused() {
+  try {
+    const r = await fetch('/service-status');
+    const d = await r.json();
+    const banner = document.getElementById('paused-banner');
+    if (d.paused) {
+      banner.style.display = 'block';
+      document.getElementById('url').disabled = true;
+      document.querySelector('.btn-primary').disabled = true;
+    } else {
+      banner.style.display = 'none';
+      document.getElementById('url').disabled = false;
+      document.querySelector('.btn-primary').disabled = false;
+    }
+  } catch (e) {}
+}
+checkPaused();
+
 function escHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -861,6 +958,7 @@ async function start() {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
+    if (err.paused) { checkPaused(); return; }
     document.getElementById('log').textContent = err.error || 'Failed to start';
     return;
   }
@@ -1963,6 +2061,10 @@ def index():
 
 @app.post("/start")
 def start():
+    global _service_paused
+    with _pause_lock:
+        if _service_paused:
+            return jsonify({"error": "paused", "paused": True}), 503
     data = request.get_json() or {}
     url = (data.get("url") or "").strip()
     job_type = (data.get("type") or "video").strip().lower()
@@ -2287,6 +2389,29 @@ def admin_clear_history():
     with open(HISTORY_PATH, "w", encoding="utf-8") as f:
         json.dump([], f)
     return jsonify({"ok": True, "message": "History cleared"})
+
+
+@app.get("/service-status")
+def service_status():
+    global _service_paused
+    with _pause_lock:
+        paused = _service_paused
+    return jsonify({"paused": paused})
+
+
+@app.post("/admin/pause")
+def admin_pause():
+    global _service_paused
+    if not COOKIES_PASSWORD:
+        abort(503)
+    data = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    new_val = bool(data.get("paused", True))
+    with _pause_lock:
+        _service_paused = new_val
+    _save_paused(new_val)
+    return jsonify({"ok": True, "paused": new_val})
 
 
 @app.before_request
