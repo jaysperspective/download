@@ -1146,8 +1146,8 @@ function renderPhase(phase, note, tail) {
 
 function lastMeaningfulLines(log, n) {
   if (!log) return '';
-  const lines = log.split('\n').map(s => s.trimEnd()).filter(s => s.length > 0);
-  return lines.slice(-n).join('\n');
+  const lines = log.split('\\n').map(s => s.trimEnd()).filter(s => s.length > 0);
+  return lines.slice(-n).join('\\n');
 }
 
 async function start() {
