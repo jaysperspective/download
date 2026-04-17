@@ -829,9 +829,17 @@ HTML = """
   <main class="main">
   <div class="left-col">
     <div class="paused-banner" id="paused-banner">
-      <h2>Service Temporarily Paused</h2>
-      <p>The web service is currently unavailable. For unlimited, uninterrupted downloads, get the full +downloads app.</p>
+      <h2>Free Service Temporarily Paused</h2>
+      <p>The free web service is currently unavailable. For unlimited, uninterrupted downloads, get the full +downloads app.</p>
       <a class="btn-get-app" href="https://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer">Get the Full Version</a>
+    </div>
+    <div class="paused-banner" id="buy-access-banner" style="border-color:#db52a6; margin-top:0;">
+      <h2 style="color:#db52a6;">Get Instant Access</h2>
+      <p>Purchase a token to use the downloader right now — no account needed, delivered to your email instantly.</p>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+        <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">Buy Access — $1 for 3 downloads</a>
+        <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer" style="background:#9b3adb;">$5 for 10 downloads</a>
+      </div>
     </div>
     <div class="card">
       <div class="url-row">
@@ -919,12 +927,15 @@ async function checkPaused() {
     const r = await fetch('/service-status');
     const d = await r.json();
     const banner = document.getElementById('paused-banner');
+    const buyBanner = document.getElementById('buy-access-banner');
     if (d.paused) {
       banner.style.display = 'block';
+      buyBanner.style.display = 'block';
       document.getElementById('url').disabled = true;
       document.querySelector('.btn-primary').disabled = true;
     } else {
       banner.style.display = 'none';
+      buyBanner.style.display = 'none';
       document.getElementById('url').disabled = false;
       document.querySelector('.btn-primary').disabled = false;
     }
@@ -2430,108 +2441,6 @@ def admin_pause():
         _service_paused = new_val
     _save_paused(new_val)
     return jsonify({"ok": True, "paused": new_val})
-
-
-_GATE_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Access Required</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fafafa; color: #111; margin: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 40px 32px; max-width: 420px; width: 100%; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-  h2 { margin: 0 0 8px; font-size: 22px; }
-  p { color: #6b7280; margin: 0 0 24px; font-size: 15px; }
-  .btn { display: block; width: 100%; text-align: center; background: #2D6A4F; color: #fff; padding: 14px; border-radius: 8px; text-decoration: none; font-size: 16px; font-weight: 600; margin-bottom: 16px; }
-  .btn:hover { background: #1e4f3a; }
-  form { display: flex; gap: 8px; }
-  input { flex: 1; border: 1.5px solid #d1d5db; border-radius: 8px; padding: 10px 12px; font-size: 14px; font-family: monospace; outline: none; }
-  input:focus { border-color: #2D6A4F; }
-  button { background: #111; color: #fff; border: none; border-radius: 8px; padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .err { color: #dc2626; font-size: 13px; margin-top: 8px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h2>Access Required</h2>
-  <p>Purchase a token to use this downloader. Your token arrives by email immediately after payment.</p>
-  <a class="btn" href="{payment_url}">Buy Access</a>
-  <p style="margin-bottom:12px;font-size:13px;">Already have a token? Enter it below.</p>
-  <form method="GET" action="/">
-    <input name="token" type="text" placeholder="Paste your token" required autocomplete="off">
-    <button type="submit">Go</button>
-  </form>
-  {error_msg}
-</div>
-</body>
-</html>"""
-
-
-def _call_token_api(endpoint: str, token: str) -> dict:
-    try:
-        data = json.dumps({"token": token}).encode()
-        req = urllib.request.Request(
-            f"{PAYMENT_APP_URL}/payment/api/access/internal/{endpoint}",
-            data=data,
-            headers={"Content-Type": "application/json", "x-internal-secret": TOKEN_INTERNAL_SECRET},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return json.loads(resp.read())
-    except Exception:
-        return {"valid": False, "reason": "payment_app_unreachable"}
-
-
-_SKIP_GATE = {"/health", "/admin", "/upload-cookies", "/service-status"}
-_SKIP_PREFIXES = ("/static/", "/admin/")
-_DOWNLOAD_PREFIXES = ("/download/", "/file/")
-
-
-@app.before_request
-def _token_gate():
-    path = request.path
-    if path in _SKIP_GATE or any(path.startswith(p) for p in _SKIP_PREFIXES):
-        return
-
-    if not TOKEN_INTERNAL_SECRET:
-        return  # gate is disabled if secret not configured
-
-    token = request.cookies.get("access_token") or request.args.get("token", "")
-
-    if not token:
-        error_html = ""
-        if "token" in request.args:
-            error_html = '<p class="err">Token not recognised. Please check and try again.</p>'
-        return _GATE_HTML.replace("{payment_url}", ACCESS_PAYMENT_URL).replace("{error_msg}", error_html), 403
-
-    is_download = any(path.startswith(p) for p in _DOWNLOAD_PREFIXES)
-    endpoint = "token/use" if is_download else "token/check"
-    result = _call_token_api(endpoint, token)
-
-    if not result.get("valid"):
-        reason = result.get("reason", "invalid")
-        if reason == "exhausted":
-            error_html = '<p class="err">Your token has no downloads remaining. Purchase a new one below.</p>'
-        else:
-            error_html = '<p class="err">Token not recognised. Please check and try again.</p>'
-        resp = app.make_response(
-            (_GATE_HTML.replace("{payment_url}", ACCESS_PAYMENT_URL).replace("{error_msg}", error_html), 403)
-        )
-        resp.delete_cookie("access_token")
-        return resp
-
-    # Token came in via query param — set cookie and redirect to clean URL
-    if request.args.get("token"):
-        clean_url = request.path
-        if request.query_string:
-            params = {k: v for k, v in request.args.items() if k != "token"}
-            if params:
-                clean_url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
-        resp = app.make_response(("", 302))
-        resp.headers["Location"] = clean_url
-        resp.set_cookie("access_token", token, httponly=True, samesite="Lax", max_age=365 * 24 * 3600)
-        return resp
 
 
 @app.before_request
