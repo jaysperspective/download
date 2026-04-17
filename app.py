@@ -826,7 +826,7 @@ HTML = """
     <div class="paused-banner" id="paused-banner">
       <h2>Service Temporarily Paused</h2>
       <p>The web service is currently unavailable. For unlimited, uninterrupted downloads, get the full +downloads app.</p>
-      <a class="btn-get-app" href="https://digitaldownloads.space/app" target="_blank" rel="noopener noreferrer">Get the Full Version</a>
+      <a class="btn-get-app" href="https://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer">Get the Full Version</a>
     </div>
     <div class="card">
       <div class="url-row">
@@ -868,6 +868,19 @@ HTML = """
       <pre id="log">Idle…</pre>
       <div id="meta"></div>
     </div>
+
+    <a href="https://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;gap:12px;background:#242222;border:1px solid #2e2c2c;border-radius:14px;padding:16px 20px;text-decoration:none;transition:border-color 0.2s;" onmouseover="this.style.borderColor='#db52a6'" onmouseout="this.style.borderColor='#2e2c2c'">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
+        <path d="M3 7C3 5.89543 3.89543 5 5 5H9.58579C9.851 5 10.1054 5.10536 10.2929 5.29289L11.7071 6.70711C11.8946 6.89464 12.149 7 12.4142 7H19C20.1046 7 21 7.89543 21 9V17C21 18.1046 20.1046 19 19 19H5C3.89543 19 3 18.1046 3 17V7Z" fill="#db52a6" opacity="0.2"/>
+        <path d="M3 7C3 5.89543 3.89543 5 5 5H9.58579C9.851 5 10.1054 5.10536 10.2929 5.29289L11.7071 6.70711C11.8946 6.89464 12.149 7 12.4142 7H19C20.1046 7 21 7.89543 21 9V17C21 18.1046 20.1046 19 19 19H5C3.89543 19 3 18.1046 3 17V7Z" stroke="#db52a6" stroke-width="1.5" stroke-linejoin="round"/>
+        <path d="M12 11V15M12 15L10 13M12 15L14 13" stroke="#db52a6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <div style="font-size:13px;font-weight:700;color:#f0eef0;">Get +downloads</div>
+        <div style="font-size:12px;color:#666;margin-top:2px;">Unlimited downloads — no queue, no limits</div>
+      </div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="margin-left:auto;flex-shrink:0"><path d="M9 18l6-6-6-6" stroke="#444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </a>
 
     <!-- download-complete modal -->
     <div id="dlModal" style="display:none; position:fixed; inset:0; z-index:999; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
