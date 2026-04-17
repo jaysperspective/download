@@ -11,7 +11,7 @@ services:
       - DOWNLOAD_DIR=/data/downloads
       - YT_UI_STATE_DIR=/data/state
       - FLASK_HOST=0.0.0.0
-      - YT_UI_FILE_TTL_DAYS=0.125
+      - YT_UI_FILE_TTL_DAYS=0.010417
       - YT_UI_JOB_TTL_SECONDS=14400
       - YT_UI_MAX_CONCURRENT=3
       - YT_UI_MAX_QUEUE=10
