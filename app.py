@@ -2539,7 +2539,7 @@ def token_unlock():
         req = urllib.request.Request(
             f"{PAYMENT_APP_URL}/payment/api/access/internal/token/check",
             data=body,
-            headers={"Content-Type": "application/json", "x-internal-secret": TOKEN_INTERNAL_SECRET},
+            headers={"Content-Type": "application/json", "x-internal-secret": TOKEN_INTERNAL_SECRET, "x-forwarded-proto": "https"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
