@@ -641,16 +641,32 @@ HTML = """
     }
     #queuePos { font-size: 13px; color: #bf9b3a; }
     #progressWrap { display: none; margin-bottom: 14px; }
-    #progressTrack { background: #1a1818; border-radius: 999px; height: 5px; overflow: hidden; }
-    #progressBar {
-      height: 100%; width: 0%; border-radius: 999px;
-      background: linear-gradient(90deg, #db52a6, #bf9b3a); transition: width 0.4s ease;
+    #progressTrack {
+      background: #1a1818; border-radius: 10px; height: 22px; overflow: hidden;
+      position: relative; border: 1px solid #242222;
     }
+    #progressBar {
+      height: 100%; width: 0%; border-radius: 10px;
+      background: linear-gradient(90deg, #db52a6, #c44e9a, #bf9b3a);
+      background-size: 200% 100%;
+      animation: shimmer 2s linear infinite;
+      transition: width 0.4s ease;
+      box-shadow: 0 0 12px rgba(219,82,166,0.3);
+    }
+    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
     #progressBar.indeterminate {
-      width: 30%; background: #db52a6; animation: barslide 1.5s infinite ease-in-out;
+      width: 30%; background: linear-gradient(90deg, transparent, #db52a6, transparent);
+      background-size: 200% 100%;
+      animation: barslide 1.5s infinite ease-in-out;
+      box-shadow: 0 0 12px rgba(219,82,166,0.3);
     }
     @keyframes barslide { 0%{transform:translateX(-200%)} 100%{transform:translateX(500%)} }
-    #progressText { font-size: 12px; color: #555; margin-top: 6px; display: block; }
+    #progressLabel {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600; color: #f0eef0; text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+      pointer-events: none; z-index: 1;
+    }
+    #progressText { font-size: 12px; color: #777; margin-top: 8px; display: block; }
     pre#log {
       background: #141212; border: 1px solid #242222; border-radius: 10px;
       color: #a09aa0; padding: 14px 16px;
@@ -817,7 +833,7 @@ HTML = """
         <button onclick="cancel()" id="cancelBtn" class="btn-cancel" style="display:none;">Cancel</button>
       </div>
       <div id="progressWrap">
-        <div id="progressTrack"><div id="progressBar"></div></div>
+        <div id="progressTrack"><div id="progressBar"></div><div id="progressLabel"></div></div>
         <small id="progressText"></small>
       </div>
       <pre id="log">Idle…</pre>
@@ -1054,7 +1070,7 @@ async function poll() {
   const res = await fetch('/status/' + currentJob);
   const data = await res.json();
   document.getElementById('log').textContent = data.log || data.status;
-  setStatus(data.status, data.queue_position);
+  setStatus(data.status);
   updateProgress(data.status, data.log || '', data);
   if ((data.type === 'spotify' || data.type === 'apple_music') && data.total_items > 0) {
     const done = data.current_index || 0;
@@ -1106,11 +1122,18 @@ function updateProgress(status, log, data) {
   const wrap = document.getElementById('progressWrap');
   const bar = document.getElementById('progressBar');
   const text = document.getElementById('progressText');
+  const label = document.getElementById('progressLabel');
   if (status === 'queued') {
     wrap.style.display = 'block';
-    bar.className = '';
-    bar.style.width = '0%';
-    text.textContent = 'Queued…';
+    bar.className = 'indeterminate';
+    bar.style.width = '';
+    label.textContent = '';
+    const pos = data.queue_position != null ? data.queue_position + 1 : null;
+    const qLen = data.queue_length || 0;
+    let qText = 'Waiting in queue\u2026';
+    if (pos != null) qText = 'Queue position: ' + pos + ' of ' + qLen;
+    if (data.active_count > 0) qText += ' \u00B7 ' + data.active_count + ' downloading now';
+    text.textContent = qText;
   } else if (status === 'running') {
     wrap.style.display = 'block';
     if (data && (data.type === 'spotify' || data.type === 'apple_music') && data.total_items > 0) {
@@ -1119,28 +1142,37 @@ function updateProgress(status, log, data) {
       const tot = data.total_items;
       bar.className = '';
       bar.style.width = pct + '%';
+      label.textContent = pct > 8 ? Math.round(pct) + '%' : '';
       text.textContent = cur + ' / ' + tot + ' tracks';
     } else {
       const pct = extractPercent(log);
       if (pct !== null) {
         bar.className = '';
         bar.style.width = pct + '%';
-        text.textContent = pct.toFixed(1) + '%';
+        label.textContent = pct > 8 ? pct.toFixed(1) + '%' : '';
+        text.textContent = pct.toFixed(1) + '% downloaded';
       } else {
         bar.className = 'indeterminate';
         bar.style.width = '';
-        text.textContent = 'Processing…';
+        label.textContent = '';
+        text.textContent = 'Processing\u2026';
       }
     }
   } else if (status === 'done') {
     wrap.style.display = 'block';
     bar.className = '';
     bar.style.width = '100%';
-    text.textContent = 'Done';
+    label.textContent = '100%';
+    bar.style.boxShadow = '0 0 16px rgba(72,199,142,0.4)';
+    bar.style.background = 'linear-gradient(90deg, #48c78e, #3ab882)';
+    text.textContent = 'Complete';
   } else {
     wrap.style.display = 'none';
     bar.className = '';
     bar.style.width = '0%';
+    bar.style.boxShadow = '';
+    bar.style.background = '';
+    label.textContent = '';
     text.textContent = '';
   }
 }
@@ -1181,12 +1213,17 @@ function resetUI() {
   document.getElementById('log').textContent = 'Idle…';
   document.getElementById('meta').innerHTML = '';
   document.getElementById('progressWrap').style.display = 'none';
-  document.getElementById('progressBar').style.width = '0%';
+  const rBar = document.getElementById('progressBar');
+  rBar.style.width = '0%';
+  rBar.style.boxShadow = '';
+  rBar.style.background = '';
+  rBar.className = '';
+  document.getElementById('progressLabel').textContent = '';
   document.getElementById('progressText').textContent = '';
-  setStatus('idle', null);
+  setStatus('idle');
 }
 
-function setStatus(status, queuePos) {
+function setStatus(status) {
   const pill = document.getElementById('statusPill');
   const pos = document.getElementById('queuePos');
   pill.textContent = status || 'idle';
@@ -1200,7 +1237,7 @@ function setStatus(status, queuePos) {
   const [bg, color] = colors[status] || ['#252323', '#555'];
   pill.style.background = bg;
   pill.style.color = color;
-  pos.textContent = status === 'queued' && queuePos != null ? 'Position in queue: ' + (queuePos + 1) : '';
+  pos.textContent = '';
 }
 
 async function cancel() {
@@ -2228,6 +2265,10 @@ def status(job_id):
         payload = {k: v for k, v in job.items() if k not in ("process", "cancel_requested", "spotify_info", "apple_music_info", "client_ip")}
         payload["log"] = job.get("log", "")
     payload["queue_position"] = queue_position(job_id)
+    with queue_cv:
+        payload["queue_length"] = len(job_queue)
+    with jobs_lock:
+        payload["active_count"] = sum(1 for j in jobs.values() if j.get("status") == "running")
     return jsonify(payload)
 
 @app.get("/download/<job_id>")
