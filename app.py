@@ -564,11 +564,10 @@ HTML = """
       padding: 3px 9px; border-radius: 999px; font-weight: 600;
     }
     .main {
-      max-width: 1400px; margin: 0 auto; padding: 24px;
-      display: grid; grid-template-columns: 420px 1fr; gap: 20px; align-items: start;
+      max-width: 520px; margin: 0 auto; padding: 24px;
+      display: flex; flex-direction: column; gap: 20px;
     }
     .left-col { display: flex; flex-direction: column; min-width: 0; }
-    .right-col { position: sticky; top: 24px; }
     .card {
       background: #242222; border: 1px solid #2e2c2c;
       border-radius: 16px; padding: 22px 24px; margin-bottom: 16px;
@@ -707,54 +706,13 @@ HTML = """
     }
     .hist-btn:hover { color: #db52a6; border-color: #db52a6; }
     /* Library panel */
-    .lib-panel {
-      background: #242222; border: 1px solid #2e2c2c; border-radius: 16px;
-      overflow: hidden; display: flex; flex-direction: column;
-    }
-    .lib-top { padding: 18px 18px 0; }
-    .lib-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
-    .lib-tab {
-      background: transparent; border: none; color: #555;
-      padding: 7px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
-      cursor: pointer; transition: background 0.15s, color 0.15s;
-    }
-    .lib-tab.active { background: rgba(219,82,166,0.15); color: #db52a6; }
-    .lib-tab:hover:not(.active) { background: #2a2828; color: #888; }
-    .lib-search {
-      width: 100%; background: #1a1818; border: 1.5px solid #353333; color: #f0eef0;
-      padding: 9px 13px; border-radius: 9px; font-size: 13px; outline: none;
-      margin-bottom: 12px; transition: border-color 0.2s;
-    }
-    .lib-search:focus { border-color: #db52a6; }
-    .lib-search::placeholder { color: #464444; }
-    .lib-list { overflow-y: auto; flex: 1; padding: 8px 10px 12px; min-height: 0; max-height: 360px; }
-    .lib-row {
-      display: flex; align-items: center; gap: 11px;
-      padding: 9px 10px; border-radius: 10px; cursor: pointer;
-      transition: background 0.15s; margin-bottom: 2px;
-    }
-    .lib-row:hover { background: #2a2828; }
-    .lib-icon {
-      width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0;
-      background: rgba(219,82,166,0.12); color: #db52a6;
-      display: flex; align-items: center; justify-content: center; font-size: 17px;
-    }
-    .lib-icon.song  { background: rgba(191,155,58,0.12); color: #bf9b3a; }
-    .lib-icon.video { background: rgba(91,155,213,0.12); color: #5b9bd5; }
-    .lib-info { flex: 1; min-width: 0; }
-    .lib-name { font-size: 13px; color: #c8c0c8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .lib-meta { font-size: 11px; color: #4a4848; margin-top: 2px; display: flex; align-items: center; gap: 5px; }
-    .lib-empty { font-size: 13px; color: #444; text-align: center; padding: 40px 0; }
-    .lib-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #353333; border-radius: 3px; }
 
     /* ── Tablet ────────────────────────────────────────────── */
     @media (max-width: 900px) {
-      .main { grid-template-columns: 1fr; padding: 14px; }
-      .right-col { position: static; top: auto; }
-      .lib-list  { max-height: 280px; }
+      .main { padding: 14px; }
     }
 
     /* ── Mobile / iPhone ───────────────────────────────────── */
@@ -776,14 +734,6 @@ HTML = """
       /* Token row */
       .token-row { flex-wrap: wrap; gap: 8px; }
       .token-row .btn-ghost { width: 100%; }
-
-      /* History rows — wrap action buttons below title */
-      .hist-row  { flex-wrap: wrap; }
-      .hist-btns { width: 100%; justify-content: flex-end; margin-top: 6px; }
-
-      /* Library */
-      .lib-list       { max-height: 220px; }
-      .lib-tabs button { padding: 6px 12px; font-size: 12px; }
 
       /* Status log */
       pre#log { font-size: 11px; max-height: 160px; }
@@ -862,40 +812,6 @@ HTML = """
     </div>
   </div><!-- /left-col -->
 
-  <div class="right-col">
-    <div class="lib-panel">
-      <div class="lib-top">
-        <div class="lib-header-row">
-          <div class="lib-tabs">
-            <button class="lib-tab active" data-tab="albums" onclick="switchLibTab('albums')">Albums</button>
-            <button class="lib-tab" data-tab="songs" onclick="switchLibTab('songs')">Songs</button>
-            <button class="lib-tab" data-tab="videos" onclick="switchLibTab('videos')">Videos</button>
-          </div>
-        </div>
-        <input id="libSearch" class="lib-search" type="text" placeholder="Search library…" oninput="renderLibrary()" />
-      </div>
-      <div class="lib-list" id="libContent"></div>
-    </div>
-
-    <!-- Download full version -->
-    <a href="http://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer"
-       style="display:flex; flex-direction:column; align-items:center; justify-content:center;
-              gap:10px; margin-top:16px; padding:28px 18px;
-              background:#1a1a1a; border:1px solid #2a2a2a; border-radius:12px;
-              text-decoration:none; cursor:pointer; transition:border-color 0.15s;"
-       onmouseover="this.style.borderColor='#e03c8a'" onmouseout="this.style.borderColor='#2a2a2a'">
-      <svg width="72" height="72" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M3 7C3 5.9 3.9 5 5 5H10L12 7H19C20.1 7 21 7.9 21 9V17C21 18.1 20.1 19 19 19H5C3.9 19 3 18.1 3 17V7Z" fill="#e03c8a"/>
-        <path d="M12 10V15M12 15L9.5 12.5M12 15L14.5 12.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      <div style="text-align:center; line-height:1.4;">
-        <div style="font-size:15px; font-weight:700; color:#f0f0f0;">+downloads</div>
-        <div style="font-size:13px; font-weight:400; color:#aaa;">full version</div>
-      </div>
-    </a>
-
-  </div><!-- /right-col -->
-
   </main>
 
 <script>
@@ -905,117 +821,6 @@ function escHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
-let libData = { albums: [], songs: [], videos: [] };
-let activeLibTab = 'albums';
-
-function categorizeLibrary(items) {
-  const albums = [], songs = [], videos = [];
-  (items || []).filter(i => i.final_status === 'done').forEach(item => {
-    const titleStr = typeof item.title === 'string' ? item.title.trim() : '';
-    if (item.type === 'video') {
-      const path = item.output_path || (item.output_paths && item.output_paths[0]) || '';
-      const stem = (path.split('/').pop() || '').replace(/\.[^.]+$/, '').trim();
-      videos.push({ ...item, videoName: titleStr || stem || 'Unknown' });
-      return;
-    }
-    const multi = item.output_paths && item.output_paths.length > 1;
-    if (multi) {
-      const parts = item.output_paths[0].split('/');
-      const folder = parts[parts.length - 2] || 'Unknown Album';
-      albums.push({ ...item, albumName: folder });
-    } else {
-      const path = item.output_path || (item.output_paths && item.output_paths[0]) || '';
-      const stem = (path.split('/').pop() || '').replace(/\.[^.]+$/, '').trim();
-      songs.push({ ...item, songName: titleStr || stem || 'Unknown' });
-    }
-  });
-  libData = { albums, songs, videos };
-}
-
-function switchLibTab(tab) {
-  activeLibTab = tab;
-  document.querySelectorAll('.lib-tab').forEach(t =>
-    t.classList.toggle('active', t.dataset.tab === tab));
-  renderLibrary();
-}
-
-function renderLibrary() {
-  const q = (document.getElementById('libSearch').value || '').toLowerCase();
-  const container = document.getElementById('libContent');
-  container.innerHTML = '';
-  const tabMap = { albums: libData.albums, songs: libData.songs, videos: libData.videos };
-  const items = tabMap[activeLibTab] || [];
-  const getName = item => activeLibTab === 'albums' ? item.albumName
-                        : activeLibTab === 'songs'  ? item.songName
-                        : item.videoName;
-  const filtered = items.filter(item => {
-    const name = getName(item);
-    return !q || (name || '').toLowerCase().includes(q) || (item.type || '').includes(q);
-  });
-  if (!filtered.length) {
-    container.innerHTML = '<div class="lib-empty">Nothing here yet.</div>';
-    return;
-  }
-  filtered.forEach(item => {
-    const row = document.createElement('div');
-    row.className = 'lib-row';
-    const icon = document.createElement('div');
-    const iconClass = activeLibTab === 'songs' ? ' song' : activeLibTab === 'videos' ? ' video' : '';
-    icon.className = 'lib-icon' + iconClass;
-    icon.textContent = activeLibTab === 'albums' ? '\u266b'
-                     : activeLibTab === 'songs'  ? '\u266a'
-                     : '\u25b6';
-    const info = document.createElement('div');
-    info.className = 'lib-info';
-    const name = document.createElement('div');
-    name.className = 'lib-name';
-    name.textContent = getName(item) || 'Unknown';
-    const meta = document.createElement('div');
-    meta.className = 'lib-meta';
-    const tag = document.createElement('span');
-    tag.className = 'hist-tag';
-    tag.textContent = item.type;
-    const ts = document.createElement('span');
-    ts.textContent = (item.timestamp || '').split('T')[0];
-    if (activeLibTab === 'albums') {
-      const cnt = document.createElement('span');
-      cnt.textContent = item.output_paths.length + ' tracks';
-      meta.append(tag, cnt, ts);
-    } else {
-      meta.append(tag, ts);
-    }
-    info.append(name, meta);
-    const btns = document.createElement('div');
-    btns.className = 'hist-btns';
-    if (activeLibTab !== 'albums' && item.job_id) {
-      const dlBtn = document.createElement('button');
-      dlBtn.className = 'hist-btn';
-      dlBtn.textContent = 'Download';
-      dlBtn.onclick = e => { e.stopPropagation(); window.location.href = '/file/' + item.job_id; };
-      btns.appendChild(dlBtn);
-    }
-    if (activeLibTab === 'albums' && item.job_id) {
-      const zipBtn = document.createElement('button');
-      zipBtn.className = 'hist-btn';
-      zipBtn.textContent = 'ZIP';
-      zipBtn.onclick = e => { e.stopPropagation(); window.location.href = '/download/' + item.job_id; };
-      btns.appendChild(zipBtn);
-    }
-    row.append(icon, info, btns);
-    container.appendChild(row);
-  });
-}
-
-async function fetchLibrary() {
-  const res = await fetch('/history?limit=500');
-  if (!res.ok) return;
-  const data = await res.json();
-  categorizeLibrary(data.items);
-  try {
-    localStorage.setItem('yt_lib_cache', JSON.stringify({ts: Date.now(), items: data.items}));
-  } catch(e) {}
-  renderLibrary();
 }
 document.querySelectorAll('details').forEach(function(el) {
   el.addEventListener('toggle', function() {
@@ -1095,14 +900,12 @@ async function poll() {
   }
   if (data.status === "done") {
     document.getElementById('cancelBtn').style.display = 'none';
-    fetchLibrary();
     showDlModal(data);
     setTimeout(resetUI, 1500);
     return;
   }
   if (data.status === "error" || data.status === "cancelled") {
     document.getElementById('cancelBtn').style.display = 'none';
-    fetchLibrary();
     return;
   }
   setTimeout(poll, 700);
@@ -1250,14 +1053,7 @@ async function cancel() {
   poll();
 }
 
-try {
-  const cached = JSON.parse(localStorage.getItem('yt_lib_cache') || 'null');
-  if (cached && cached.items) {
-    categorizeLibrary(cached.items);
-    renderLibrary();
-  }
-} catch(e) {}
-fetchLibrary();
+
 </script>
 
 <footer style="text-align:center; padding:24px 16px 20px; font-size:12px; color:#555;">
@@ -2172,6 +1968,21 @@ def start():
     job_type = (data.get("type") or "video").strip().lower()
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
+    _BLOCKED_DOMAINS = {
+        "pornhub", "xvideos", "xnxx", "xhamster", "redtube", "youporn",
+        "tube8", "spankbang", "eporner", "tnaflix", "drtuber", "sunporno",
+        "txxx", "hdzog", "hclips", "porntrex", "fuq", "beeg", "porn",
+        "xxxbunker", "4tube", "porntube", "slutload", "motherless",
+        "heavy-r", "efukt", "bestgore", "theync", "crazyshit",
+        "anyporn", "nuvid", "pornone", "sexvid", "empflix", "porndig",
+        "alohatube", "pornoxo", "3movs", "ashemaletube", "trannytube",
+        "shemalestube", "chaturbate", "stripchat", "bongacams", "cam4",
+        "livejasmin", "myfreecams", "camsoda", "onlyfans",
+    }
+    from urllib.parse import urlparse as _urlparse
+    _host = (_urlparse(url).hostname or "").lower()
+    if any(d in _host for d in _BLOCKED_DOMAINS):
+        return jsonify({"error": "Adult content is not supported."}), 400
     if detect_soundcloud(url) and job_type in {"", "auto", "video", "audio"}:
         job_type = "soundcloud"
     if detect_spotify(url):
