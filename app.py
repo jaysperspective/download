@@ -88,6 +88,60 @@ def _save_paused(val: bool):
 
 _service_paused: bool = _load_paused()
 _pause_lock = threading.Lock()
+_PAUSE_CACHE_TTL = 5.0  # seconds — how often to re-read pause.json from disk
+_pause_cache_at: float = 0.0
+
+def _is_paused() -> bool:
+    """Read pause state with a short TTL so file edits take effect without restart."""
+    global _service_paused, _pause_cache_at
+    now = time.time()
+    with _pause_lock:
+        if now - _pause_cache_at > _PAUSE_CACHE_TTL:
+            _service_paused = _load_paused()
+            _pause_cache_at = now
+        return _service_paused
+
+# Cache of tokens that have been validated recently, so /start can bypass pause without
+# calling the payment API on every request.
+_TOKEN_CACHE_TTL = 60.0  # seconds
+_valid_token_cache: dict = {}  # token -> expires_at epoch
+_valid_token_cache_lock = threading.Lock()
+
+def _remember_valid_token(token: str):
+    if not token:
+        return
+    with _valid_token_cache_lock:
+        _valid_token_cache[token] = time.time() + _TOKEN_CACHE_TTL
+
+def _is_token_valid(token: str) -> bool:
+    """Return True if token passes the payment-app check. Short-lived in-memory cache."""
+    if not token or not TOKEN_INTERNAL_SECRET:
+        return False
+    now = time.time()
+    with _valid_token_cache_lock:
+        exp = _valid_token_cache.get(token)
+        if exp and exp > now:
+            return True
+    try:
+        body = json.dumps({"token": token}).encode()
+        req = urllib.request.Request(
+            f"{PAYMENT_APP_URL}/payment/api/access/internal/token/check",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-internal-secret": TOKEN_INTERNAL_SECRET,
+                "x-forwarded-proto": "https",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            result = json.loads(resp.read())
+    except Exception:
+        return False
+    if result.get("valid"):
+        _remember_valid_token(token)
+        return True
+    return False
 
 YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
@@ -727,13 +781,21 @@ HTML = """
       pointer-events: none; z-index: 1;
     }
     #progressText { font-size: 12px; color: #777; margin-top: 8px; display: block; }
+    .phase-label {
+      font-size: 14px; font-weight: 600; color: #f0eef0;
+      margin: 6px 0 2px; letter-spacing: 0.2px;
+    }
+    .phase-note { font-size: 12px; color: #9a8f9a; margin-bottom: 8px; min-height: 0; }
+    .phase-note.err { color: #ff8f8f; }
     pre#log {
       background: #141212; border: 1px solid #242222; border-radius: 10px;
-      color: #a09aa0; padding: 14px 16px;
-      font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace;
-      min-height: 60px; max-height: 200px; overflow-y: auto;
-      white-space: pre-wrap; word-break: break-all; line-height: 1.6; margin: 0;
+      color: #776f77; padding: 10px 14px;
+      font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace;
+      min-height: 0; max-height: 120px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all; line-height: 1.55; margin: 0;
+      display: none;
     }
+    pre#log.visible { display: block; }
     #meta { font-size: 13px; color: #777; margin-top: 10px; }
     #meta a { color: #db52a6; text-decoration: none; }
     #meta a:hover { text-decoration: underline; }
@@ -878,7 +940,9 @@ HTML = """
         <div id="progressTrack"><div id="progressBar"></div><div id="progressLabel"></div></div>
         <small id="progressText"></small>
       </div>
-      <pre id="log">Idle…</pre>
+      <div id="phase" class="phase-label">Idle…</div>
+      <div id="phaseNote" class="phase-note"></div>
+      <pre id="log"></pre>
       <div id="meta"></div>
     </div>
 
@@ -1064,6 +1128,28 @@ function syncScOptions() {
 document.getElementById('type').addEventListener('change', syncScOptions);
 syncScOptions();
 
+function renderPhase(phase, note, tail) {
+  const phEl = document.getElementById('phase');
+  const noteEl = document.getElementById('phaseNote');
+  const logEl = document.getElementById('log');
+  phEl.textContent = phase || '';
+  noteEl.textContent = note || '';
+  noteEl.className = 'phase-note' + ((phase && /fail|error|timed out|lost/i.test(phase)) ? ' err' : '');
+  if (tail && tail.length) {
+    logEl.textContent = tail;
+    logEl.classList.add('visible');
+  } else {
+    logEl.textContent = '';
+    logEl.classList.remove('visible');
+  }
+}
+
+function lastMeaningfulLines(log, n) {
+  if (!log) return '';
+  const lines = log.split('\n').map(s => s.trimEnd()).filter(s => s.length > 0);
+  return lines.slice(-n).join('\n');
+}
+
 async function start() {
   const url = document.getElementById('url').value.trim();
   if (!url) return;
@@ -1078,30 +1164,74 @@ async function start() {
   const type = document.getElementById('type').value;
   const scQuality = document.getElementById('scQuality').value;
   const scPlaylist = document.getElementById('scPlaylist').checked;
-  document.getElementById('log').textContent = "Starting\u2026";
+  renderPhase('Starting\u2026', '', '');
   document.getElementById('meta').textContent = "";
-  const res = await fetch('/start', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({url, type, sc_quality: scQuality, sc_playlist: scPlaylist})
-  });
+  setStatus('queued');
+  let res;
+  try {
+    res = await fetch('/start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        url, type,
+        sc_quality: scQuality, sc_playlist: scPlaylist,
+        token: localStorage.getItem('access_token') || undefined
+      })
+    });
+  } catch (e) {
+    renderPhase('Could not reach server', '', 'Check your internet connection and try again.');
+    setStatus('error');
+    return;
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    if (err.paused) { checkPaused(); return; }
-    document.getElementById('log').textContent = err.error || 'Failed to start';
+    if (err.paused) {
+      checkPaused();
+      renderPhase('Service paused', '', 'The downloader is paused for maintenance. Purchase or enter an access token to continue.');
+      setStatus('error');
+      return;
+    }
+    renderPhase('Couldn\u2019t start download', '', err.error || ('Server returned HTTP ' + res.status));
+    setStatus('error');
     return;
   }
   const data = await res.json();
   currentJob = data.job_id;
+  _pollFailCount = 0;
   document.getElementById('cancelBtn').style.display = 'inline-block';
   poll();
 }
 
+let _pollFailCount = 0;
+
 async function poll() {
   if (!currentJob) return;
-  const res = await fetch('/status/' + currentJob);
-  const data = await res.json();
-  document.getElementById('log').textContent = data.log || data.status;
+  const jobAtRequest = currentJob;
+  let data;
+  try {
+    const res = await fetch('/status/' + currentJob);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+    _pollFailCount = 0;
+  } catch (e) {
+    _pollFailCount++;
+    if (jobAtRequest !== currentJob) return;
+    if (_pollFailCount >= 5) {
+      renderPhase('Lost connection', '', 'We couldn\u2019t reach the server after several tries. Refresh the page to check the job.');
+      setStatus('error');
+      return;
+    }
+    renderPhase('Reconnecting\u2026', 'Attempt ' + _pollFailCount + '/5', '');
+    const backoff = Math.min(5000, 500 * Math.pow(2, _pollFailCount));
+    setTimeout(poll, backoff);
+    return;
+  }
+  // Phase + note + raw log tail
+  const phase = data.phase || (data.status === 'queued' ? 'Queued' : (data.status === 'running' ? 'Working\u2026' : (data.status || '')));
+  const note = data.phase_note || '';
+  const errMsg = (data.status === 'error') ? (data.error_message || '') : '';
+  const rawTail = lastMeaningfulLines(data.log || '', 3);
+  renderPhase(phase, note || errMsg, rawTail);
   setStatus(data.status);
   updateProgress(data.status, data.log || '', data);
   if ((data.type === 'spotify' || data.type === 'apple_music') && data.total_items > 0) {
@@ -1239,8 +1369,9 @@ document.getElementById('dlModal').addEventListener('click', function(e) {
 
 function resetUI() {
   currentJob = null;
+  _pollFailCount = 0;
   document.getElementById('url').value = '';
-  document.getElementById('log').textContent = 'Idle…';
+  renderPhase('Idle\u2026', '', '');
   document.getElementById('meta').innerHTML = '';
   document.getElementById('progressWrap').style.display = 'none';
   const rBar = document.getElementById('progressBar');
@@ -1506,6 +1637,95 @@ def save_jobs():
 def job_log_path(job_id: str) -> Path:
     return LOG_DIR / f"{job_id}.log"
 
+
+# ---- Phase detection & error classification ----
+# Each yt-dlp stdout line is mapped to a short high-level phase shown to users.
+_PHASE_PATTERNS = [
+    (re.compile(r'Downloading webpage|Downloading API JSON|Downloading tweet', re.I), "Resolving URL"),
+    (re.compile(r'Downloading (?:JSON metadata|m3u8 information|MPD manifest|player|signature|playlist)', re.I), "Fetching metadata"),
+    (re.compile(r'\[download\] Destination:'), "Downloading"),
+    (re.compile(r'\[download\]\s+\d'), "Downloading"),
+    (re.compile(r'\[Merger\]|Merging formats'), "Merging video + audio"),
+    (re.compile(r'\[ExtractAudio\]|\[ffmpeg\] Destination'), "Converting audio"),
+    (re.compile(r'\[EmbedThumbnail\]|\[Metadata\]|\[ThumbnailsConvertor\]'), "Finalizing"),
+]
+
+def _detect_phase(line: str):
+    for pat, phase in _PHASE_PATTERNS:
+        if pat.search(line):
+            return phase
+    return None
+
+
+# Friendly messages for common yt-dlp failures. Scanned against the job log tail.
+_ERROR_SIGNALS = [
+    ("No video could be found in this tweet", "This post doesn't contain a video."),
+    ("Tweet is unavailable", "This tweet is unavailable (deleted, private, or requires login)."),
+    ("NSFW tweet requires authentication", "This tweet is marked sensitive and requires a logged-in account."),
+    ("Sign in to confirm your age", "This video is age-restricted and requires login."),
+    ("Private video", "This video is private."),
+    ("This video is only available for registered users", "This video requires a logged-in account."),
+    ("Video unavailable", "Video is unavailable or region-locked."),
+    ("This video has been removed", "This video has been removed."),
+    ("Premieres in", "This video hasn't been released yet."),
+    ("Unsupported URL", "This link isn't supported — try a direct video URL."),
+    ("HTTP Error 404", "Page not found — double-check the URL."),
+    ("HTTP Error 403", "Access was denied by the source server."),
+    ("HTTP Error 429", "The source rate-limited us. Try again in a minute."),
+    ("Requested format is not available", "No downloadable format is available for this content."),
+    ("Unable to extract", "Couldn't extract media from this page."),
+    ("The provided YouTube account cookies are no longer valid", "Our login cookies expired. The owner has been alerted — please try again shortly."),
+]
+
+def _classify_error(log_text: str) -> str:
+    """Scan recent log lines for a known error signal and return a friendly message."""
+    if not log_text:
+        return ""
+    tail = log_text.splitlines()[-60:]
+    for line in reversed(tail):
+        for needle, message in _ERROR_SIGNALS:
+            if needle.lower() in line.lower():
+                return message
+    # Fall back to the last ERROR line, trimmed.
+    for line in reversed(tail):
+        stripped = line.strip()
+        if stripped.startswith("ERROR:"):
+            return stripped[:240]
+    return ""
+
+
+# Stall detection: warn at 60s of no stdout, kill at 300s.
+STALL_WARN_SECONDS = int(os.environ.get("YT_UI_STALL_WARN", "60"))
+STALL_KILL_SECONDS = int(os.environ.get("YT_UI_STALL_KILL", "300"))
+
+def _stall_monitor(job_id: str):
+    """Background thread: mark stalled jobs and kill ones that go fully silent."""
+    while True:
+        time.sleep(10)
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job or job.get("status") != "running":
+                return
+            last = job.get("last_output_at") or job.get("started_at") or time.time()
+            proc = job.get("process")
+        silence = time.time() - last
+        if silence >= STALL_KILL_SECONDS and proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            with jobs_lock:
+                j = jobs.get(job_id)
+                if j:
+                    j["stall_killed"] = True
+                    j["phase_note"] = f"Timed out — no output for {int(silence)}s."
+            return
+        elif silence >= STALL_WARN_SECONDS:
+            with jobs_lock:
+                j = jobs.get(job_id)
+                if j and j.get("status") == "running":
+                    j["phase_note"] = f"Still working — no output for {int(silence)}s…"
+
 def _parse_dt(val):
     if isinstance(val, datetime):
         return val
@@ -1541,53 +1761,83 @@ def _apple_music_fetch_metadata(url: str) -> dict:
     """Fetch Apple Music track/album metadata via iTunes Lookup API. No credentials needed."""
     try:
         parsed = urlparse(url)
-        parts = [p for p in parsed.path.strip("/").split("/") if p]
-        country = parts[0]
-        kind = parts[1]
-        entity_id = parts[-1]
-        track_id = parse_qs(parsed.query).get("i", [None])[0]
-    except (IndexError, Exception):
-        raise ValueError(f"Unrecognized Apple Music URL: {url}")
+    except Exception:
+        raise ValueError("That doesn't look like a valid Apple Music URL.")
 
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if len(parts) < 3:
+        raise ValueError(
+            "Couldn't parse that Apple Music URL. "
+            "Make sure you copied the full link to a song or album."
+        )
+    country = parts[0]
+    kind = parts[1]
+    entity_id = parts[-1]
+    track_id = parse_qs(parsed.query).get("i", [None])[0]
+
+    if not re.fullmatch(r"[a-z]{2}", country.lower()):
+        raise ValueError(
+            "That Apple Music URL is missing a country code — "
+            "copy the link directly from the Apple Music app or website."
+        )
     if kind == "playlist":
         raise ValueError(
-            "Apple Music playlist lookup is not supported. "
+            "Apple Music playlists aren't supported. "
             "Paste a single song or album URL instead."
         )
     if kind not in {"album", "song"}:
-        raise ValueError(f"Unsupported Apple Music entity type: {kind}")
+        raise ValueError(
+            f"Unsupported Apple Music link type: '{kind}'. "
+            "Only song and album URLs work."
+        )
+    if not re.fullmatch(r"\d+", entity_id):
+        raise ValueError(
+            "Couldn't find the song/album ID in that URL. "
+            "Make sure you copied the full link."
+        )
 
     def itunes_lookup(lookup_id, entity=None):
         params = f"id={lookup_id}&country={country}"
         if entity:
             params += f"&entity={entity}"
-        req = urllib.request.Request(
-            f"https://itunes.apple.com/lookup?{params}",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read())
+        last_exc = None
+        for attempt in range(2):  # single retry for transient failures
+            try:
+                req = urllib.request.Request(
+                    f"https://itunes.apple.com/lookup?{params}",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read())
+            except Exception as e:
+                last_exc = e
+                time.sleep(0.5)
+        raise ValueError(f"Apple Music lookup service is unavailable right now ({last_exc}).")
 
     # Single track: song URL or album URL with ?i= parameter
     if kind == "song" or track_id:
         tid = track_id or entity_id
         data = itunes_lookup(tid)
-        if not data["results"]:
-            raise ValueError("Track not found in iTunes catalog")
+        if not data.get("results"):
+            raise ValueError("Track not found in the iTunes catalog for this country.")
         t = data["results"][0]
         title = t.get("trackName", "")
         artist = t.get("artistName", "")
+        if not title:
+            raise ValueError("iTunes returned no track info for this link.")
         return {"kind": "track", "name": title, "tracks": [{"title": title, "artist": artist}]}
 
     # Album
     data = itunes_lookup(entity_id, entity="song")
-    if not data["results"]:
-        raise ValueError("Album not found in iTunes catalog")
+    if not data.get("results"):
+        raise ValueError("Album not found in the iTunes catalog for this country.")
     collection = data["results"][0]
     album_name = collection.get("collectionName", "album")
     raw = [r for r in data["results"][1:] if r.get("wrapperType") == "track" and r.get("trackName")]
     raw.sort(key=lambda x: x.get("trackNumber", 0))
     tracks = [{"title": r["trackName"], "artist": r.get("artistName", "")} for r in raw]
+    if not tracks:
+        raise ValueError("iTunes returned no tracks for that album.")
     return {"kind": "album", "name": album_name, "tracks": tracks}
 
 
@@ -1692,10 +1942,13 @@ def restore_jobs_from_disk():
             status = meta.get("status", "unknown")
             if status == "running":
                 meta["status"] = "error"
+                meta["phase"] = "Failed"
+                meta["error_message"] = "The server restarted while this job was running. Please try again."
                 meta["log"] = "Server restarted during download"
                 meta["finished_at"] = now
             elif status == "queued":
                 meta["status"] = "cancelled"
+                meta["phase"] = "Cancelled"
                 meta["log"] = "Cancelled after restart"
                 meta["finished_at"] = now
             meta.setdefault("log", "")
@@ -1814,6 +2067,11 @@ def run_job(job_id: str):
             os.makedirs(out_dir, exist_ok=True)
             total = len(tracks)
             failures_list = []
+            with jobs_lock:
+                jobs[job_id]["started_at"] = time.time()
+                jobs[job_id]["last_output_at"] = time.time()
+                jobs[job_id]["phase"] = "Preparing Spotify tracks"
+            threading.Thread(target=_stall_monitor, args=(job_id,), daemon=True).start()
 
             for idx, track_meta in enumerate(tracks):
                 with jobs_lock:
@@ -1826,6 +2084,9 @@ def run_job(job_id: str):
                 with jobs_lock:
                     jobs[job_id]["current_index"] = idx
                     jobs[job_id]["progress_pct"] = pct
+                    jobs[job_id]["last_output_at"] = time.time()
+                    jobs[job_id]["phase"] = f"Downloading track {idx+1}/{total}"
+                    jobs[job_id].pop("phase_note", None)
                     old_log = jobs[job_id].get("log", "")
                     jobs[job_id]["log"] = "\n".join(
                         (old_log + f"\n[{idx+1}/{total}] {artist} - {title}").splitlines()[-120:]
@@ -1868,6 +2129,8 @@ def run_job(job_id: str):
                             jobs[job_id]["log"] = "\n".join(
                                 (jobs[job_id].get("log", "") + "\n" + line).splitlines()[-120:]
                             )
+                            jobs[job_id]["last_output_at"] = time.time()
+                            jobs[job_id].pop("phase_note", None)
                             jobs[job_id]["output_paths"] = list(output_paths)
                         with jobs_lock:
                             if jobs[job_id].get("cancel_requested"):
@@ -1894,16 +2157,23 @@ def run_job(job_id: str):
             if cancelled:
                 with jobs_lock:
                     jobs[job_id]["status"] = "cancelled"
+                    jobs[job_id]["phase"] = "Cancelled"
+                    jobs[job_id].pop("phase_note", None)
                     jobs[job_id]["log"] += "\nCancelled by user"
                     save_jobs()
             elif failures_list and len(failures_list) == total:
                 with jobs_lock:
                     jobs[job_id]["status"] = "error"
+                    jobs[job_id]["phase"] = "Failed"
+                    jobs[job_id].pop("phase_note", None)
+                    jobs[job_id]["error_message"] = f"All {total} tracks failed to match on YouTube."
                     jobs[job_id]["log"] += f"\nAll {total} tracks failed."
                     save_jobs()
             else:
                 with jobs_lock:
                     jobs[job_id]["status"] = "done"
+                    jobs[job_id]["phase"] = "Complete"
+                    jobs[job_id].pop("phase_note", None)
                     jobs[job_id]["progress_pct"] = 100
                     jobs[job_id]["current_index"] = total
                     jobs[job_id]["output_paths"] = list(output_paths)
@@ -1925,6 +2195,11 @@ def run_job(job_id: str):
             os.makedirs(out_dir, exist_ok=True)
             total = len(tracks)
             failures_list = []
+            with jobs_lock:
+                jobs[job_id]["started_at"] = time.time()
+                jobs[job_id]["last_output_at"] = time.time()
+                jobs[job_id]["phase"] = "Preparing Apple Music tracks"
+            threading.Thread(target=_stall_monitor, args=(job_id,), daemon=True).start()
 
             for idx, track_meta in enumerate(tracks):
                 with jobs_lock:
@@ -1937,6 +2212,9 @@ def run_job(job_id: str):
                 with jobs_lock:
                     jobs[job_id]["current_index"] = idx
                     jobs[job_id]["progress_pct"] = pct
+                    jobs[job_id]["last_output_at"] = time.time()
+                    jobs[job_id]["phase"] = f"Downloading track {idx+1}/{total}"
+                    jobs[job_id].pop("phase_note", None)
                     old_log = jobs[job_id].get("log", "")
                     jobs[job_id]["log"] = "\n".join(
                         (old_log + f"\n[{idx+1}/{total}] {artist} - {title}").splitlines()[-120:]
@@ -1979,6 +2257,8 @@ def run_job(job_id: str):
                             jobs[job_id]["log"] = "\n".join(
                                 (jobs[job_id].get("log", "") + "\n" + line).splitlines()[-120:]
                             )
+                            jobs[job_id]["last_output_at"] = time.time()
+                            jobs[job_id].pop("phase_note", None)
                             jobs[job_id]["output_paths"] = list(output_paths)
                         with jobs_lock:
                             if jobs[job_id].get("cancel_requested"):
@@ -2005,16 +2285,23 @@ def run_job(job_id: str):
             if cancelled:
                 with jobs_lock:
                     jobs[job_id]["status"] = "cancelled"
+                    jobs[job_id]["phase"] = "Cancelled"
+                    jobs[job_id].pop("phase_note", None)
                     jobs[job_id]["log"] += "\nCancelled by user"
                     save_jobs()
             elif failures_list and len(failures_list) == total:
                 with jobs_lock:
                     jobs[job_id]["status"] = "error"
+                    jobs[job_id]["phase"] = "Failed"
+                    jobs[job_id].pop("phase_note", None)
+                    jobs[job_id]["error_message"] = f"All {total} tracks failed to match on YouTube."
                     jobs[job_id]["log"] += f"\nAll {total} tracks failed."
                     save_jobs()
             else:
                 with jobs_lock:
                     jobs[job_id]["status"] = "done"
+                    jobs[job_id]["phase"] = "Complete"
+                    jobs[job_id].pop("phase_note", None)
                     jobs[job_id]["progress_pct"] = 100
                     jobs[job_id]["current_index"] = total
                     jobs[job_id]["output_paths"] = list(output_paths)
@@ -2030,6 +2317,10 @@ def run_job(job_id: str):
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         with jobs_lock:
             jobs[job_id]["process"] = p
+            jobs[job_id]["started_at"] = time.time()
+            jobs[job_id]["last_output_at"] = time.time()
+            jobs[job_id]["phase"] = "Resolving URL"
+        threading.Thread(target=_stall_monitor, args=(job_id,), daemon=True).start()
         log_lines = []
         for raw_line in p.stdout:
             line = raw_line.rstrip()
@@ -2045,8 +2336,13 @@ def run_job(job_id: str):
                     output_path = line
             if "Destination:" in line and not output_path:
                 last_file = line.split("Destination:", 1)[-1].strip()
+            new_phase = _detect_phase(line)
             with jobs_lock:
                 jobs[job_id]["log"] = "\n".join(log_lines[-120:])
+                jobs[job_id]["last_output_at"] = time.time()
+                jobs[job_id].pop("phase_note", None)
+                if new_phase:
+                    jobs[job_id]["phase"] = new_phase
                 if output_path:
                     jobs[job_id]["output_path"] = output_path
                     jobs[job_id]["output_paths"] = list(output_paths)
@@ -2063,11 +2359,15 @@ def run_job(job_id: str):
         if cancelled:
             with jobs_lock:
                 jobs[job_id]["status"] = "cancelled"
+                jobs[job_id]["phase"] = "Cancelled"
+                jobs[job_id].pop("phase_note", None)
                 jobs[job_id]["log"] = jobs[job_id].get("log", "") + "\nCancelled by user"
                 save_jobs()
         elif code == 0:
             with jobs_lock:
                 jobs[job_id]["status"] = "done"
+                jobs[job_id]["phase"] = "Complete"
+                jobs[job_id].pop("phase_note", None)
                 jobs[job_id]["output_paths"] = list(output_paths)
                 final_path = output_path or last_file
                 if final_path:
@@ -2087,6 +2387,7 @@ def run_job(job_id: str):
                 p2 = subprocess.Popen(cmd_no_cookies, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 with jobs_lock:
                     jobs[job_id]["process"] = p2
+                    jobs[job_id]["last_output_at"] = time.time()
                 log_lines = []
                 for raw_line in p2.stdout:
                     line = raw_line.rstrip()
@@ -2101,8 +2402,13 @@ def run_job(job_id: str):
                             output_path = line
                     if "Destination:" in line and not output_path:
                         last_file = line.split("Destination:", 1)[-1].strip()
+                    new_phase = _detect_phase(line)
                     with jobs_lock:
                         jobs[job_id]["log"] = "\n".join(log_lines[-120:])
+                        jobs[job_id]["last_output_at"] = time.time()
+                        jobs[job_id].pop("phase_note", None)
+                        if new_phase:
+                            jobs[job_id]["phase"] = new_phase
                         if output_path:
                             jobs[job_id]["output_path"] = output_path
                             jobs[job_id]["output_paths"] = list(output_paths)
@@ -2117,6 +2423,8 @@ def run_job(job_id: str):
             if code == 0:
                 with jobs_lock:
                     jobs[job_id]["status"] = "done"
+                    jobs[job_id]["phase"] = "Complete"
+                    jobs[job_id].pop("phase_note", None)
                     jobs[job_id]["output_paths"] = list(output_paths)
                     final_path = output_path or last_file
                     if final_path:
@@ -2125,11 +2433,23 @@ def run_job(job_id: str):
                     save_jobs()
             else:
                 with jobs_lock:
-                    jobs[job_id]["status"] = "error"
+                    j = jobs[job_id]
+                    j["status"] = "error"
+                    j["phase"] = "Failed"
+                    j.pop("phase_note", None)
+                    if j.get("stall_killed"):
+                        j["error_message"] = "Timed out — the source stopped responding."
+                    else:
+                        friendly = _classify_error(j.get("log", ""))
+                        if friendly:
+                            j["error_message"] = friendly
                     save_jobs()
     except Exception as e:
         with jobs_lock:
             jobs[job_id]["status"] = "error"
+            jobs[job_id]["phase"] = "Failed"
+            jobs[job_id].pop("phase_note", None)
+            jobs[job_id]["error_message"] = "Unexpected server error — please try again."
             jobs[job_id]["log"] = f"Exception: {e}"
             save_jobs()
     finally:
@@ -2190,13 +2510,14 @@ def index():
 
 @app.post("/start")
 def start():
-    global _service_paused
-    with _pause_lock:
-        if _service_paused:
-            return jsonify({"error": "paused", "paused": True}), 503
     data = request.get_json() or {}
     url = (data.get("url") or "").strip()
     job_type = (data.get("type") or "video").strip().lower()
+    # Token holders bypass the maintenance pause. Token comes from body or header.
+    client_token = (data.get("token") or request.headers.get("X-Access-Token") or "").strip()
+    if _is_paused():
+        if not (client_token and _is_token_valid(client_token)):
+            return jsonify({"error": "paused", "paused": True}), 503
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
     _BLOCKED_DOMAINS = {
@@ -2522,10 +2843,7 @@ def admin_clear_history():
 
 @app.get("/service-status")
 def service_status():
-    global _service_paused
-    with _pause_lock:
-        paused = _service_paused
-    return jsonify({"paused": paused})
+    return jsonify({"paused": _is_paused()})
 
 
 @app.post("/token-unlock")
@@ -2544,14 +2862,49 @@ def token_unlock():
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
             result = json.loads(resp.read())
+        if result.get("valid"):
+            _remember_valid_token(token)
         return jsonify(result)
     except Exception:
         return jsonify({"valid": False, "reason": "service_unavailable"})
 
 
+@app.get("/admin/debug-job/<job_id>")
+def admin_debug_job(job_id):
+    if not COOKIES_PASSWORD:
+        abort(503)
+    pw = request.args.get("pw", "")
+    if not hmac.compare_digest(pw, COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    if not re.fullmatch(r'[0-9a-f\-]{36}', job_id):
+        abort(400)
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job"}), 404
+    # Sanitize internal fields that aren't JSON-serializable.
+    sanitized = {}
+    for k, v in job.items():
+        if k in ("process", "cancel_requested"):
+            continue
+        try:
+            json.dumps(v, default=str)
+            sanitized[k] = v
+        except Exception:
+            sanitized[k] = str(v)
+    log_path = job_log_path(job_id)
+    full_log = ""
+    if log_path.exists():
+        try:
+            full_log = log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            full_log = ""
+    return jsonify({"job": json.loads(json.dumps(sanitized, default=str)), "full_log": full_log})
+
+
 @app.post("/admin/pause")
 def admin_pause():
-    global _service_paused
+    global _service_paused, _pause_cache_at
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
@@ -2560,6 +2913,7 @@ def admin_pause():
     new_val = bool(data.get("paused", True))
     with _pause_lock:
         _service_paused = new_val
+        _pause_cache_at = time.time()
     _save_paused(new_val)
     return jsonify({"ok": True, "paused": new_val})
 
