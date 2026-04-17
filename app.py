@@ -824,16 +824,25 @@ HTML = """
       <div id="meta"></div>
     </div>
 
-    <div class="card">
-      <div class="section-label" style="margin-bottom:12px;">History</div>
-      <div id="historyPreview"></div>
-      <details id="historyDetails" style="margin-top:8px;">
-        <summary style="font-size:12px; color:#444; cursor:pointer; list-style:none; display:flex; align-items:center; gap:5px; user-select:none; margin-top:4px;">
-          <span id="histChevron" style="font-size:10px; transition:transform 0.2s;">&#9654;</span>
-          <span>View all</span>
-        </summary>
-        <div id="history" style="margin-top:14px;"></div>
-      </details>
+    <!-- download-complete modal -->
+    <div id="dlModal" style="display:none; position:fixed; inset:0; z-index:999; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
+      <div style="background:#1e1c1c; border:1px solid #333; border-radius:14px; padding:28px 32px; max-width:420px; width:90%; text-align:center;">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" style="margin-bottom:12px;">
+          <circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/>
+          <path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div id="dlModalTitle" style="font-size:15px; font-weight:600; color:#f0eef0; margin-bottom:6px;"></div>
+        <div id="dlModalSub" style="font-size:12px; color:#777; margin-bottom:20px;"></div>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <a id="dlModalBtn" href="#" style="display:inline-flex; align-items:center; gap:6px; padding:10px 28px; background:#db52a6; color:#fff; font-size:14px; font-weight:600; border-radius:8px; text-decoration:none; transition:background 0.15s;"
+             onmouseover="this.style.background='#c4478f'" onmouseout="this.style.background='#db52a6'">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download
+          </a>
+          <button onclick="closeDlModal()" style="padding:10px 20px; background:transparent; border:1px solid #333; color:#999; font-size:13px; border-radius:8px; cursor:pointer; transition:border-color 0.15s;"
+                  onmouseover="this.style.borderColor='#555'" onmouseout="this.style.borderColor='#333'">Close</button>
+        </div>
+      </div>
     </div>
   </div><!-- /left-col -->
 
@@ -994,9 +1003,8 @@ async function fetchLibrary() {
 }
 document.querySelectorAll('details').forEach(function(el) {
   el.addEventListener('toggle', function() {
-    const chevronId = this.querySelector('summary span[id]').id;
-    document.getElementById(chevronId).style.transform = this.open ? 'rotate(90deg)' : '';
-    if (this.id === 'historyDetails' && this.open) fetchFullHistory();
+    const chevronId = this.querySelector('summary span[id]');
+    if (chevronId) chevronId.style.transform = this.open ? 'rotate(90deg)' : '';
   });
 });
 
@@ -1071,13 +1079,14 @@ async function poll() {
   }
   if (data.status === "done") {
     document.getElementById('cancelBtn').style.display = 'none';
-    fetchHistory(); fetchLibrary();
-    setTimeout(resetUI, 3000);
+    fetchLibrary();
+    showDlModal(data);
+    setTimeout(resetUI, 1500);
     return;
   }
   if (data.status === "error" || data.status === "cancelled") {
     document.getElementById('cancelBtn').style.display = 'none';
-    fetchHistory(); fetchLibrary();
+    fetchLibrary();
     return;
   }
   setTimeout(poll, 700);
@@ -1136,6 +1145,36 @@ function updateProgress(status, log, data) {
   }
 }
 
+function showDlModal(data) {
+  const modal = document.getElementById('dlModal');
+  const title = document.getElementById('dlModalTitle');
+  const sub = document.getElementById('dlModalSub');
+  const btn = document.getElementById('dlModalBtn');
+  const multi = data.output_paths && data.output_paths.length > 1;
+  if (multi) {
+    const paths = data.output_paths;
+    const stem = (paths[0].split('/').pop() || '').replace(/\\.[^.]+$/, '').trim();
+    title.textContent = stem + (paths.length > 1 ? ' + ' + (paths.length - 1) + ' more' : '');
+    sub.textContent = paths.length + ' files \u2014 zipped together';
+    btn.textContent = ' Download ZIP';
+    btn.href = '/download/' + currentJob;
+  } else {
+    const name = data.file || (data.output_path ? data.output_path.split('/').pop() : 'file');
+    title.textContent = name;
+    sub.textContent = (data.type || 'video').toUpperCase();
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Download';
+    btn.href = '/download/' + currentJob;
+  }
+  modal.style.display = 'flex';
+}
+
+function closeDlModal() {
+  document.getElementById('dlModal').style.display = 'none';
+}
+document.getElementById('dlModal').addEventListener('click', function(e) {
+  if (e.target === this) closeDlModal();
+});
+
 function resetUI() {
   currentJob = null;
   document.getElementById('url').value = '';
@@ -1174,78 +1213,6 @@ async function cancel() {
   poll();
 }
 
-function buildHistoryList(items) {
-  const list = document.createElement('div');
-  items.forEach(item => {
-    const row = document.createElement('div');
-    row.className = 'hist-row';
-    const left = document.createElement('div');
-    left.className = 'hist-left';
-    const multi = item.output_paths && item.output_paths.length > 1;
-    const mainLabel = multi
-      ? (item.output_paths.length + ' files')
-      : (item.title || (item.output_path ? item.output_path.split('/').pop() : item.url || ''));
-    const statusCls = 'hist-status ' + (item.final_status || 'cancelled');
-    left.innerHTML =
-      '<div class="hist-main">' + escHtml(mainLabel || item.url || '') + '</div>'
-      + '<div class="hist-sub">'
-      + '<span class="hist-tag">' + escHtml(item.type) + '</span>'
-      + '<span class="' + escHtml(statusCls) + '">' + escHtml(item.final_status || '') + '</span>'
-      + '<span>' + escHtml(item.timestamp) + '</span>'
-      + '</div>';
-    const right = document.createElement('div');
-    right.className = 'hist-btns';
-    if (multi) {
-      if (item.job_id) {
-        const zipBtn = document.createElement('button');
-        zipBtn.className = 'hist-btn';
-        zipBtn.textContent = 'ZIP';
-        zipBtn.onclick = () => { window.location.href = '/download/' + item.job_id; };
-        right.appendChild(zipBtn);
-      }
-    } else if (item.job_id) {
-      const dlBtn = document.createElement('button');
-      dlBtn.className = 'hist-btn';
-      dlBtn.textContent = 'Download';
-      dlBtn.onclick = () => { window.location.href = '/file/' + item.job_id; };
-      right.appendChild(dlBtn);
-    }
-    row.appendChild(left);
-    row.appendChild(right);
-    list.appendChild(row);
-  });
-  return list;
-}
-
-async function fetchHistory() {
-  const res = await fetch('/history?limit=5');
-  if (!res.ok) return;
-  const data = await res.json();
-  const container = document.getElementById('historyPreview');
-  container.innerHTML = '';
-  if (!data.items || data.items.length === 0) {
-    container.innerHTML = '<div class="hist-empty">No history yet.</div>';
-  } else {
-    container.appendChild(buildHistoryList(data.items));
-  }
-  const details = document.getElementById('historyDetails');
-  if (details && details.open) fetchFullHistory();
-}
-
-async function fetchFullHistory() {
-  const res = await fetch('/history?limit=500');
-  if (!res.ok) return;
-  const data = await res.json();
-  const container = document.getElementById('history');
-  container.innerHTML = '';
-  if (!data.items || data.items.length === 0) {
-    container.innerHTML = '<div class="hist-empty">No history yet.</div>';
-  } else {
-    container.appendChild(buildHistoryList(data.items));
-  }
-}
-
-fetchHistory();
 try {
   const cached = JSON.parse(localStorage.getItem('yt_lib_cache') || 'null');
   if (cached && cached.items) {
