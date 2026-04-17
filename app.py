@@ -143,6 +143,31 @@ def _is_token_valid(token: str) -> bool:
         return True
     return False
 
+def _consume_token(token: str) -> dict:
+    """Atomically validate and decrement a token. Returns payment-app JSON (valid, remaining, ...) or {} on error."""
+    if not token or not TOKEN_INTERNAL_SECRET:
+        return {}
+    try:
+        body = json.dumps({"token": token}).encode()
+        req = urllib.request.Request(
+            f"{PAYMENT_APP_URL}/payment/api/access/internal/token/use",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-internal-secret": TOKEN_INTERNAL_SECRET,
+                "x-forwarded-proto": "https",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            result = json.loads(resp.read())
+    except Exception:
+        return {}
+    # Invalidate cached 'check' result so subsequent checks reflect new remaining.
+    with _valid_token_cache_lock:
+        _valid_token_cache.pop(token, None)
+    return result if isinstance(result, dict) else {}
+
 YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
 
@@ -1196,6 +1221,13 @@ async function start() {
     return;
   }
   const data = await res.json();
+  if (data.token_remaining !== undefined) {
+    showTokenUnlocked(data.token_remaining);
+    if (data.token_remaining <= 0) {
+      localStorage.removeItem('access_token');
+      _tokenUnlocked = false;
+    }
+  }
   currentJob = data.job_id;
   _pollFailCount = 0;
   document.getElementById('cancelBtn').style.display = 'inline-block';
@@ -2515,9 +2547,11 @@ def start():
     job_type = (data.get("type") or "video").strip().lower()
     # Token holders bypass the maintenance pause. Token comes from body or header.
     client_token = (data.get("token") or request.headers.get("X-Access-Token") or "").strip()
+    paused_bypass = False
     if _is_paused():
         if not (client_token and _is_token_valid(client_token)):
             return jsonify({"error": "paused", "paused": True}), 503
+        paused_bypass = True
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
     _BLOCKED_DOMAINS = {
@@ -2616,7 +2650,12 @@ def start():
             return jsonify({"error": "Queue is full. Try again later."}), 429
         job_queue.append(job_id)
         queue_cv.notify()
-    return jsonify({"job_id": job_id, "status": "queued"})
+    resp = {"job_id": job_id, "status": "queued"}
+    if paused_bypass and client_token:
+        consumed = _consume_token(client_token)
+        if consumed.get("valid"):
+            resp["token_remaining"] = consumed.get("remaining")
+    return jsonify(resp)
 
 @app.get("/status/<job_id>")
 def status(job_id):
