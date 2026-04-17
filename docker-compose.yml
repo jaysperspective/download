@@ -23,6 +23,11 @@ services:
       - YT_UI_SMTP_USER=${YT_UI_SMTP_USER}
       - YT_UI_SMTP_PASS=${YT_UI_SMTP_PASS}
       - YT_UI_ALERT_EMAIL=${YT_UI_ALERT_EMAIL}
+      - TOKEN_INTERNAL_SECRET=${TOKEN_INTERNAL_SECRET}
+      - PAYMENT_APP_URL=${PAYMENT_APP_URL:-http://host.docker.internal:4001}
+      - ACCESS_PAYMENT_URL=${ACCESS_PAYMENT_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${APP_PORT:-5055}:5055"
 
