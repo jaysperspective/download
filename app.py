@@ -882,6 +882,25 @@ HTML = """
       <div id="meta"></div>
     </div>
 
+    <div class="card" id="token-card" style="padding:16px 18px;">
+      <div id="token-unlocked" style="display:none;align-items:center;gap:10px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/><path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="font-size:13px;color:#48c78e;font-weight:600;">Access token active</span>
+        <span id="token-remaining" style="font-size:12px;color:#666;margin-left:2px;"></span>
+        <button onclick="clearToken()" style="margin-left:auto;background:transparent;border:none;color:#555;font-size:11px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:color 0.15s;" onmouseover="this.style.color='#e05c5c'" onmouseout="this.style.color='#555'">Remove</button>
+      </div>
+      <div id="token-input-row" style="display:flex;gap:8px;align-items:center;">
+        <input id="token-field" type="text" placeholder="Have an access token? Enter it here" autocomplete="off" spellcheck="false"
+          style="flex:1;background:#1a1818;border:1px solid #2e2c2c;border-radius:8px;padding:10px 12px;font-size:13px;font-family:monospace;color:#f0eef0;outline:none;transition:border-color 0.15s;"
+          onfocus="this.style.borderColor='#db52a6'" onblur="this.style.borderColor='#2e2c2c'"
+          onkeydown="if(event.key==='Enter')unlockWithToken()" />
+        <button onclick="unlockWithToken()" id="token-submit-btn"
+          style="background:#db52a6;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background 0.15s;"
+          onmouseover="this.style.background='#c4478f'" onmouseout="this.style.background='#db52a6'">Unlock</button>
+      </div>
+      <div id="token-error" style="display:none;font-size:12px;color:#e05c5c;margin-top:6px;"></div>
+    </div>
+
     <a href="https://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;gap:12px;background:#242222;border:1px solid #2e2c2c;border-radius:14px;padding:16px 20px;text-decoration:none;transition:border-color 0.2s;" onmouseover="this.style.borderColor='#db52a6'" onmouseout="this.style.borderColor='#2e2c2c'">
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
         <path d="M3 7C3 5.89543 3.89543 5 5 5H9.58579C9.851 5 10.1054 5.10536 10.2929 5.29289L11.7071 6.70711C11.8946 6.89464 12.149 7 12.4142 7H19C20.1046 7 21 7.89543 21 9V17C21 18.1046 20.1046 19 19 19H5C3.89543 19 3 18.1046 3 17V7Z" fill="#db52a6" opacity="0.2"/>
@@ -922,13 +941,93 @@ HTML = """
 <script>
 let currentJob = null;
 
+let _tokenUnlocked = false;
+
+async function validateStoredToken() {
+  const token = localStorage.getItem('access_token');
+  if (!token) return false;
+  try {
+    const r = await fetch('/token-unlock', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token})
+    });
+    const d = await r.json();
+    if (d.valid) {
+      _tokenUnlocked = true;
+      showTokenUnlocked(d.remaining);
+      return true;
+    } else {
+      localStorage.removeItem('access_token');
+      return false;
+    }
+  } catch (e) { return false; }
+}
+
+function showTokenUnlocked(remaining) {
+  document.getElementById('token-input-row').style.display = 'none';
+  document.getElementById('token-error').style.display = 'none';
+  const row = document.getElementById('token-unlocked');
+  row.style.display = 'flex';
+  if (remaining !== undefined) {
+    document.getElementById('token-remaining').textContent = `(${remaining} download${remaining !== 1 ? 's' : ''} remaining)`;
+  }
+}
+
+function clearToken() {
+  localStorage.removeItem('access_token');
+  _tokenUnlocked = false;
+  document.getElementById('token-unlocked').style.display = 'none';
+  document.getElementById('token-input-row').style.display = 'flex';
+  checkPaused();
+}
+
+async function unlockWithToken() {
+  const token = document.getElementById('token-field').value.trim();
+  const errEl = document.getElementById('token-error');
+  const btn = document.getElementById('token-submit-btn');
+  if (!token) return;
+  errEl.style.display = 'none';
+  btn.textContent = 'Checking…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/token-unlock', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token})
+    });
+    const d = await r.json();
+    if (d.valid) {
+      localStorage.setItem('access_token', token);
+      _tokenUnlocked = true;
+      showTokenUnlocked(d.remaining);
+      // If page was paused, unlock the UI
+      document.getElementById('paused-banner').style.display = 'none';
+      document.getElementById('buy-access-banner').style.display = 'none';
+      document.getElementById('url').disabled = false;
+      document.querySelector('.btn-primary').disabled = false;
+    } else {
+      errEl.textContent = d.reason === 'exhausted'
+        ? 'This token has no downloads remaining.'
+        : 'Token not recognised. Please check and try again.';
+      errEl.style.display = 'block';
+    }
+  } catch (e) {
+    errEl.textContent = 'Could not validate token. Please try again.';
+    errEl.style.display = 'block';
+  } finally {
+    btn.textContent = 'Unlock';
+    btn.disabled = false;
+  }
+}
+
 async function checkPaused() {
   try {
     const r = await fetch('/service-status');
     const d = await r.json();
     const banner = document.getElementById('paused-banner');
     const buyBanner = document.getElementById('buy-access-banner');
-    if (d.paused) {
+    if (d.paused && !_tokenUnlocked) {
       banner.style.display = 'block';
       buyBanner.style.display = 'block';
       document.getElementById('url').disabled = true;
@@ -941,7 +1040,8 @@ async function checkPaused() {
     }
   } catch (e) {}
 }
-checkPaused();
+
+validateStoredToken().then(() => checkPaused());
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -2426,6 +2526,27 @@ def service_status():
     with _pause_lock:
         paused = _service_paused
     return jsonify({"paused": paused})
+
+
+@app.post("/token-unlock")
+def token_unlock():
+    data = request.get_json(silent=True) or {}
+    token = (data.get("token") or "").strip()
+    if not token or not TOKEN_INTERNAL_SECRET:
+        return jsonify({"valid": False, "reason": "invalid"})
+    try:
+        body = json.dumps({"token": token}).encode()
+        req = urllib.request.Request(
+            f"{PAYMENT_APP_URL}/payment/api/access/internal/token/check",
+            data=body,
+            headers={"Content-Type": "application/json", "x-internal-secret": TOKEN_INTERNAL_SECRET},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            result = json.loads(resp.read())
+        return jsonify(result)
+    except Exception:
+        return jsonify({"valid": False, "reason": "service_unavailable"})
 
 
 @app.post("/admin/pause")
