@@ -1447,52 +1447,222 @@ async function cancel() {
 </script>
 
 <footer style="text-align:center; padding:24px 16px 20px; font-size:12px; color:#555;">
-  <a href="#" onclick="document.getElementById('tcModal').style.display='flex'; return false;"
-     style="color:#555; text-decoration:underline; text-underline-offset:3px;">Terms &amp; Conditions</a>
+  <a href="/terms" style="color:#555; text-decoration:underline; text-underline-offset:3px;">Terms of Service</a>
+  <span style="margin:0 8px; color:#3a3838;">·</span>
+  <a href="/privacy" style="color:#555; text-decoration:underline; text-underline-offset:3px;">Privacy Policy</a>
 </footer>
-
-<!-- Terms & Conditions modal -->
-<div id="tcModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:2000; align-items:center; justify-content:center; padding:20px; box-sizing:border-box;">
-  <div style="background:#1a1a1a; border:1px solid #333; border-radius:14px; padding:32px 28px; width:600px; max-width:100%; max-height:85vh; overflow-y:auto; box-shadow:0 8px 40px rgba(0,0,0,0.7);">
-    <h2 style="margin:0 0 6px; font-size:18px; color:#f0f0f0;">Terms &amp; Conditions</h2>
-    <p style="margin:0 0 20px; font-size:12px; color:#555;">Last updated: February 2026</p>
-
-    <div style="font-size:13px; color:#aaa; line-height:1.7;">
-      <p><strong style="color:#f0f0f0;">USE AT YOUR OWN RISK.</strong> This tool is provided for personal, private use only. By using it, you agree to the following terms in full.</p>
-
-      <p><strong style="color:#f0f0f0;">1. No Warranty</strong><br>
-      This software is provided "as is", without warranty of any kind, express or implied. The operator makes no guarantees regarding availability, reliability, accuracy, or fitness for any purpose.</p>
-
-      <p><strong style="color:#f0f0f0;">2. Limitation of Liability</strong><br>
-      To the fullest extent permitted by applicable law, the operator of this service shall not be liable for any direct, indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use this tool, including but not limited to loss of data, loss of profits, or any other losses.</p>
-
-      <p><strong style="color:#f0f0f0;">3. Your Responsibility</strong><br>
-      You are solely responsible for ensuring that your use of this tool complies with all applicable laws in your jurisdiction, including copyright law. Downloading copyrighted content without authorization may be illegal. The operator does not condone or encourage any unlawful activity.</p>
-
-      <p><strong style="color:#f0f0f0;">4. No Affiliation</strong><br>
-      This tool is not affiliated with, endorsed by, or connected to YouTube, Google, SoundCloud, Spotify, Apple, or any other third-party platform. All trademarks belong to their respective owners.</p>
-
-      <p><strong style="color:#f0f0f0;">5. Indemnification</strong><br>
-      You agree to indemnify and hold harmless the operator from any claims, damages, or expenses (including legal fees) arising from your use of this service or your violation of these terms.</p>
-
-      <p><strong style="color:#f0f0f0;">6. Changes</strong><br>
-      These terms may be updated at any time without notice. Continued use of the service constitutes acceptance of the current terms.</p>
-
-      <p style="margin-top:24px; padding:14px; background:#111; border-radius:8px; color:#888; font-size:12px;">
-        By using this tool you acknowledge that you have read, understood, and agreed to these terms and that you use this service entirely at your own risk.
-      </p>
-    </div>
-
-    <button onclick="document.getElementById('tcModal').style.display='none'"
-      style="margin-top:20px; width:100%; padding:11px; background:#333; border:none; border-radius:8px; color:#f0f0f0; font-size:14px; cursor:pointer;">
-      Close
-    </button>
-  </div>
-</div>
 
 </body>
 </html>
 """
+
+_LEGAL_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1a1818">
+  <title>{{ page_title }} · +downloads</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1818; color: #f0eef0; min-height: 100vh; line-height: 1.6;
+    }
+    .header {
+      background: #242222; border-bottom: 1px solid #2e2c2c;
+      padding: 0 32px; height: 62px; display: flex; align-items: center; gap: 12px;
+    }
+    .logo { font-size: 24px; font-weight: 800; color: #db52a6; letter-spacing: -0.5px; text-decoration: none; }
+    .header a.logo:hover { color: #c9479a; }
+    .legal-wrap { max-width: 720px; margin: 0 auto; padding: 36px 24px 80px; }
+    h1 { font-size: 28px; font-weight: 800; color: #f0eef0; margin-bottom: 6px; letter-spacing: -0.4px; }
+    .updated { font-size: 12px; color: #666; margin-bottom: 28px;
+      text-transform: uppercase; letter-spacing: 0.08em; }
+    h2 { font-size: 17px; font-weight: 700; color: #db52a6; margin: 28px 0 8px; }
+    h3 { font-size: 14px; font-weight: 700; color: #bf9b3a; margin: 18px 0 4px; }
+    p, li { font-size: 14px; color: #c8c4c8; margin-bottom: 12px; }
+    ul, ol { padding-left: 22px; margin-bottom: 12px; }
+    li { margin-bottom: 6px; }
+    strong { color: #f0eef0; font-weight: 600; }
+    a { color: #bf9b3a; }
+    a:hover { color: #d6b34d; }
+    .callout {
+      background: rgba(191,155,58,0.07); border: 1px solid rgba(191,155,58,0.18);
+      border-radius: 10px; padding: 14px 16px; font-size: 13px; color: #c8c4c8;
+      margin: 16px 0;
+    }
+    .nav-back {
+      display: inline-block; margin-top: 36px; padding: 10px 18px;
+      background: #242222; border: 1px solid #353333; border-radius: 10px;
+      color: #f0eef0; text-decoration: none; font-size: 13px;
+    }
+    .nav-back:hover { background: #2e2c2c; color: #db52a6; border-color: #db52a6; }
+    footer { text-align: center; padding: 22px 16px; font-size: 12px; color: #555; }
+    footer a { color: #555; text-decoration: underline; text-underline-offset: 3px; }
+    footer .sep { margin: 0 8px; color: #3a3838; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <a class="logo" href="/">+downloads</a>
+  </div>
+  <main class="legal-wrap">
+    <h1>{{ page_title }}</h1>
+    <div class="updated">Last updated: {{ updated }}</div>
+    {{ body|safe }}
+    <a class="nav-back" href="/">← Back to +downloads</a>
+  </main>
+  <footer>
+    <a href="/terms">Terms of Service</a>
+    <span class="sep">·</span>
+    <a href="/privacy">Privacy Policy</a>
+  </footer>
+</body>
+</html>
+"""
+
+_PRIVACY_BODY = """
+<p><strong>+downloads</strong> is operated as a personal-use service at <a href="https://digitaldownloads.space">digitaldownloads.space</a>, with a companion iOS app distributed through the Apple App Store. This Privacy Policy describes what information we receive, how it is used, and the choices you have.</p>
+
+<div class="callout">We do not sell, rent, or share personal information with advertisers or data brokers. We do not run user-tracking analytics. Aside from anonymous server logs and standard ad serving, the service is designed to operate without collecting identifying data.</div>
+
+<h2>1. Information We Collect</h2>
+
+<h3>Web service (digitaldownloads.space)</h3>
+<ul>
+  <li><strong>Submitted URLs.</strong> When you paste a URL to download, that URL is processed by the server and the corresponding media is fetched on your behalf. URLs are kept in a short-lived job queue and recent-history list while a download is active.</li>
+  <li><strong>Generated files.</strong> Audio and video files produced by your downloads are stored temporarily on the server so you can retrieve them, then automatically removed.</li>
+  <li><strong>Server logs.</strong> Standard web server logs may record IP address, user agent, request path, and timestamps for security and abuse prevention. Logs are rotated and not used to build user profiles.</li>
+  <li><strong>Cookies.</strong> The site uses functional cookies only (e.g., to remember UI preferences and to maintain your session for the duration of an active download). No cross-site tracking cookies are set by us.</li>
+  <li><strong>Advertising.</strong> The site loads Google AdSense scripts. Google may use cookies and similar technologies to serve ads; please refer to <a href="https://policies.google.com/technologies/ads">Google's Ads policy</a> for details. You can opt out of personalized ads at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>.</li>
+</ul>
+
+<h3>iOS app (+downloads)</h3>
+<ul>
+  <li><strong>Local files.</strong> The app reads audio and video files from a folder you explicitly choose with the iOS file picker. Files never leave your device through this app.</li>
+  <li><strong>Apple Music library.</strong> If you choose to connect Apple Music, the app uses Apple's MusicKit framework to read your library and play tracks. This data stays between your device and Apple's services.</li>
+  <li><strong>Favorites and playlists.</strong> Your favorites and playlists are stored in your private iCloud Key-Value Store so they sync between your own devices. We never see this data.</li>
+  <li><strong>Diagnostics.</strong> Crash and performance diagnostics are produced on-device by Apple's MetricKit framework and saved locally for your reference. Nothing is uploaded to us.</li>
+  <li><strong>Radio streams.</strong> Radio station metadata is fetched from the public <a href="https://www.radio-browser.info">radio-browser.info</a> directory using a generic User-Agent. The directory operator may log requests; see their site for details.</li>
+  <li><strong>Location (optional).</strong> If you grant the location permission, your approximate region is used solely on-device to suggest local radio stations. It is not sent to our servers.</li>
+</ul>
+
+<h2>2. How Information Is Used</h2>
+<ul>
+  <li>To process the downloads and playback you request.</li>
+  <li>To deliver completed files back to your browser or device.</li>
+  <li>To detect, prevent, and respond to abuse, fraud, or technical issues.</li>
+  <li>To comply with legal obligations.</li>
+</ul>
+
+<h2>3. Information We Do Not Collect</h2>
+<p>We do not collect names, email addresses, phone numbers, payment information, contacts, microphone input, or camera input. The iOS app does not include a third-party analytics SDK and does not implement Apple's App Tracking Transparency tracking.</p>
+
+<h2>4. Sharing</h2>
+<p>We do not sell or rent personal information. Limited disclosure may occur in the following cases:</p>
+<ul>
+  <li><strong>Service providers.</strong> Hosting and DNS providers process traffic on our behalf to operate the website.</li>
+  <li><strong>Advertising partners.</strong> Google AdSense receives request information necessary to serve ads, as described above.</li>
+  <li><strong>Apple platform services.</strong> The iOS app uses MusicKit, MetricKit, and iCloud Key-Value Store, which exchange data directly between your device and Apple under Apple's privacy policy.</li>
+  <li><strong>Legal compliance.</strong> Information may be disclosed when required by law, subpoena, or to protect rights, safety, or property.</li>
+</ul>
+
+<h2>5. Retention</h2>
+<ul>
+  <li>Downloaded files: removed automatically after a short delivery window, typically within hours.</li>
+  <li>Job queue entries: removed when the job completes or is cancelled.</li>
+  <li>Server logs: retained for a short period for abuse prevention, then rotated.</li>
+  <li>iCloud-synced favorites/playlists: retained on your iCloud account until you remove them.</li>
+</ul>
+
+<h2>6. Children's Privacy</h2>
+<p>+downloads is not directed to children under 13, and we do not knowingly collect personal information from children. If you believe a child has provided information through the service, please contact us so we can remove it.</p>
+
+<h2>7. International Use</h2>
+<p>The service may be accessed from outside the country where it is hosted. By using it you understand that any limited information described above may be processed in jurisdictions with different data protection laws.</p>
+
+<h2>8. Your Choices</h2>
+<ul>
+  <li>You can stop using the service at any time.</li>
+  <li>In iOS Settings, you can revoke Apple Music, location, or iCloud permissions for the app individually.</li>
+  <li>You can clear locally saved diagnostic reports from inside the iOS app's Settings screen.</li>
+  <li>You can opt out of personalized advertising via Google's controls noted above.</li>
+</ul>
+
+<h2>9. Security</h2>
+<p>We use commercially reasonable technical and organizational measures to protect the service. However, no system is perfectly secure, and we cannot guarantee absolute security of any data transmitted over the internet.</p>
+
+<h2>10. Changes</h2>
+<p>This Privacy Policy may be updated from time to time. Material changes will be reflected in the "Last updated" date above. Continued use of the service after a change indicates acceptance of the revised policy.</p>
+
+<h2>11. Contact</h2>
+<p>Questions or requests related to this Privacy Policy can be sent through the contact form on <a href="https://digitaldownloads.space">digitaldownloads.space</a>.</p>
+"""
+
+_TERMS_BODY = """
+<p>These Terms of Service ("Terms") govern your access to and use of <strong>+downloads</strong> at <a href="https://digitaldownloads.space">digitaldownloads.space</a> and the +downloads iOS application (collectively, the "Service"). By using the Service you agree to these Terms in full. If you do not agree, do not use the Service.</p>
+
+<div class="callout">USE AT YOUR OWN RISK. The Service is provided for personal, private use only. You are responsible for ensuring that your use complies with all applicable laws.</div>
+
+<h2>1. The Service</h2>
+<p>The web service lets you submit a public media URL and receive back the corresponding audio or video file. The iOS application is a media player that plays files from a folder you choose, songs in your Apple Music library, and live internet radio streams from public directories.</p>
+
+<h2>2. Eligibility</h2>
+<p>You must be at least 13 years old, or the minimum age of digital consent in your jurisdiction, to use the Service. By using the Service you represent that you meet this requirement.</p>
+
+<h2>3. Acceptable Use</h2>
+<p>You agree not to:</p>
+<ul>
+  <li>Use the Service to download or distribute content you do not have the right to download or distribute, including copyrighted material without authorization.</li>
+  <li>Circumvent technical protection measures or terms of any third-party platform.</li>
+  <li>Use the Service to harass, defame, or harm any person.</li>
+  <li>Submit automated, abusive, or excessive requests, or otherwise attempt to overload the Service.</li>
+  <li>Reverse engineer, decompile, or attempt to extract source code, except to the extent expressly permitted by law.</li>
+  <li>Use the Service in violation of any applicable law, regulation, or third-party terms.</li>
+</ul>
+
+<h2>4. Your Responsibility for Content</h2>
+<p>You are solely responsible for the URLs you submit and any media you download, store, share, or play through the Service. Downloading copyrighted material without authorization may be illegal in your jurisdiction. The operator does not review submitted URLs and does not condone or encourage any unlawful activity.</p>
+
+<h2>5. Third-Party Platforms and Trademarks</h2>
+<p>The Service is not affiliated with, endorsed by, or sponsored by YouTube, Google, SoundCloud, Spotify, Apple, Bandcamp, radio-browser.info, or any other third-party service. All trademarks and source platforms remain the property of their respective owners. Any references to such platforms are nominative only.</p>
+
+<h2>6. Intellectual Property</h2>
+<p>The Service, including its software, design, and branding, is owned by the operator and protected by intellectual property laws. You are granted a limited, non-exclusive, non-transferable, revocable license to use the Service for personal, non-commercial purposes consistent with these Terms.</p>
+
+<h2>7. App Store Terms (iOS)</h2>
+<p>If you obtain the iOS app through the Apple App Store, you also agree to Apple's Licensed Application End User License Agreement. Apple is not a party to these Terms and is not responsible for the app or any claims relating to it. To the extent there is a conflict between these Terms and Apple's EULA, Apple's EULA will govern, but only to the extent of that conflict.</p>
+
+<h2>8. No Warranty</h2>
+<p>THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE" WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, OR UNINTERRUPTED OR ERROR-FREE OPERATION. We make no warranty regarding the accuracy, completeness, reliability, or availability of any download or playback.</p>
+
+<h2>9. Limitation of Liability</h2>
+<p>TO THE FULLEST EXTENT PERMITTED BY LAW, IN NO EVENT WILL THE OPERATOR BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, OR GOODWILL, ARISING OUT OF OR RELATING TO YOUR USE OF OR INABILITY TO USE THE SERVICE, WHETHER BASED ON CONTRACT, TORT, STRICT LIABILITY, OR ANY OTHER LEGAL THEORY, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. THE OPERATOR'S TOTAL LIABILITY FOR ANY CLAIM RELATING TO THE SERVICE WILL NOT EXCEED ONE HUNDRED U.S. DOLLARS (US$100).</p>
+
+<h2>10. Indemnification</h2>
+<p>You agree to indemnify, defend, and hold harmless the operator and its affiliates from any claims, damages, liabilities, costs, or expenses (including reasonable legal fees) arising out of or related to your use of the Service, your violation of these Terms, or your violation of any law or third-party right.</p>
+
+<h2>11. Termination</h2>
+<p>We may suspend or terminate your access to the Service at any time, with or without notice, for any reason, including suspected violation of these Terms. You may stop using the Service at any time. Sections that by their nature should survive termination will survive.</p>
+
+<h2>12. Changes</h2>
+<p>We may modify these Terms at any time. Material changes will be reflected in the "Last updated" date above. Continued use of the Service after a change constitutes acceptance of the revised Terms.</p>
+
+<h2>13. Governing Law and Disputes</h2>
+<p>These Terms are governed by the laws of the United States and the State of California, without regard to conflict-of-laws principles. Any dispute arising out of or relating to these Terms or the Service will be brought in the state or federal courts located in California, and you consent to the personal jurisdiction of those courts.</p>
+
+<h2>14. Severability</h2>
+<p>If any provision of these Terms is held unenforceable, the remaining provisions will remain in full force and effect, and the unenforceable provision will be modified only to the extent necessary to make it enforceable.</p>
+
+<h2>15. Contact</h2>
+<p>Questions about these Terms can be sent through the contact form on <a href="https://digitaldownloads.space">digitaldownloads.space</a>.</p>
+"""
+
+_LEGAL_LAST_UPDATED = "May 7, 2026"
+
 
 def is_valid_url(url: str) -> bool:
     if not url:
@@ -2539,6 +2709,24 @@ def run_job(job_id: str):
 @app.get("/")
 def index():
     return render_template_string(HTML, version=VERSION)
+
+@app.get("/privacy")
+def privacy():
+    return render_template_string(
+        _LEGAL_PAGE_TEMPLATE,
+        page_title="Privacy Policy",
+        updated=_LEGAL_LAST_UPDATED,
+        body=_PRIVACY_BODY,
+    )
+
+@app.get("/terms")
+def terms():
+    return render_template_string(
+        _LEGAL_PAGE_TEMPLATE,
+        page_title="Terms of Service",
+        updated=_LEGAL_LAST_UPDATED,
+        body=_TERMS_BODY,
+    )
 
 @app.post("/start")
 def start():
