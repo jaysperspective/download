@@ -1542,12 +1542,16 @@ _PRIVACY_BODY = """
 
 <h3>iOS app (+downloads)</h3>
 <ul>
-  <li><strong>Local files.</strong> The app reads audio and video files from a folder you explicitly choose with the iOS file picker. Files never leave your device through this app.</li>
-  <li><strong>Apple Music library.</strong> If you choose to connect Apple Music, the app uses Apple's MusicKit framework to read your library and play tracks. This data stays between your device and Apple's services.</li>
+  <li><strong>Local files.</strong> The app reads audio and video files from a folder you explicitly choose with the iOS file picker. The files themselves are never transmitted to us.</li>
+  <li><strong>iCloud Drive (optional).</strong> If the folder you choose lives in iCloud Drive, files that are not yet downloaded to your device are fetched on demand by Apple's iCloud Drive service when you press play. iCloud Drive operates directly between your device and Apple under Apple's privacy policy.</li>
+  <li><strong>Apple Music library.</strong> If you choose to connect Apple Music, the app uses Apple's MusicKit framework to read your library and play tracks. A copy of your library's track metadata is kept locally on your device so the app opens quickly; that cache is deleted when you tap Disconnect in Settings.</li>
   <li><strong>Favorites and playlists.</strong> Your favorites and playlists are stored in your private iCloud Key-Value Store so they sync between your own devices. We never see this data.</li>
   <li><strong>Diagnostics.</strong> Crash and performance diagnostics are produced on-device by Apple's MetricKit framework and saved locally for your reference. Nothing is uploaded to us.</li>
-  <li><strong>Radio streams.</strong> Radio station metadata is fetched from the public <a href="https://www.radio-browser.info">radio-browser.info</a> directory using a generic User-Agent. The directory operator may log requests; see their site for details.</li>
-  <li><strong>Location (optional).</strong> If you grant the location permission, your approximate region is used solely on-device to suggest local radio stations. It is not sent to our servers.</li>
+  <li><strong>Wi-Fi desktop sync (optional).</strong> The app can pair with the +downloads desktop application over your local network using Apple's Bonjour service discovery and a PIN-gated HTTP connection. Audio and video files transfer directly between your device and your desktop computer; the data does not pass through any server we operate.</li>
+  <li><strong>Track identification (optional, AcoustID).</strong> When you tap "Identify this track" in the tag editor, an acoustic fingerprint of the audio plus its duration is sent to the public <a href="https://acoustid.org">AcoustID</a> service to look up the recording. The fingerprint is derived from the audio content; the audio file itself is not uploaded. AcoustID may log requests; see their site for details.</li>
+  <li><strong>Lyrics (optional, LRClib).</strong> When you open the lyrics view for a track, the artist name, track title, album, and duration are sent to the public <a href="https://lrclib.net">LRClib</a> service to look up lyrics. LRClib may log requests; see their site for details.</li>
+  <li><strong>pCloud (optional).</strong> If you connect a pCloud account in Settings, the app authenticates with pCloud via their hosted sign-in page (OAuth), reads a list of audio files from your pCloud account, and streams playback directly from pCloud when you press play. Your access token is stored only in the iOS Keychain on your device. Your interactions with pCloud are governed by pCloud's own privacy policy.</li>
+  <li><strong>Instagram Stories share.</strong> When you tap Share to Instagram Stories from the player, the app generates a share-card image on your device and places it on the iOS system pasteboard for the Instagram app to read. Nothing is sent to a server by us; the handoff happens locally between your device and the Instagram app.</li>
 </ul>
 
 <h2>2. How Information Is Used</h2>
@@ -1566,7 +1570,8 @@ _PRIVACY_BODY = """
 <ul>
   <li><strong>Service providers.</strong> Hosting and DNS providers process traffic on our behalf to operate the website.</li>
   <li><strong>Advertising partners.</strong> Google AdSense receives request information necessary to serve ads, as described above.</li>
-  <li><strong>Apple platform services.</strong> The iOS app uses MusicKit, MetricKit, and iCloud Key-Value Store, which exchange data directly between your device and Apple under Apple's privacy policy.</li>
+  <li><strong>Apple platform services.</strong> The iOS app uses MusicKit, MetricKit, iCloud Drive, and iCloud Key-Value Store, which exchange data directly between your device and Apple under Apple's privacy policy.</li>
+  <li><strong>Optional third-party services.</strong> When you use the iOS app's optional features for track identification (AcoustID), lyrics (LRClib), or pCloud playback, your device communicates directly with those services. We do not relay or intermediate that traffic, and each provider's own privacy policy applies to the data they receive.</li>
   <li><strong>Legal compliance.</strong> Information may be disclosed when required by law, subpoena, or to protect rights, safety, or property.</li>
 </ul>
 
@@ -1661,7 +1666,7 @@ _TERMS_BODY = """
 <p>Questions about these Terms can be sent through the contact form on <a href="https://digitaldownloads.space">digitaldownloads.space</a>.</p>
 """
 
-_LEGAL_LAST_UPDATED = "May 7, 2026"
+_LEGAL_LAST_UPDATED = "May 18, 2026"
 
 
 def is_valid_url(url: str) -> bool:
