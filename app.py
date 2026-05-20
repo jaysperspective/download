@@ -2666,6 +2666,25 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
     <p class="sub">Thanks for buying <strong>+downloads for Desktop</strong>. Your installer download link has been emailed to you &mdash; check your inbox (and your spam folder, just in case).</p>
     <p class="helper">Didn't get the email within a few minutes? <a href="mailto:digitalsov2026@gmail.com?subject=Desktop%20installer%20link">Contact support</a> and we'll resend your download link.</p>
     {% endif %}
+    {% elif state == 'update' %}
+    <div class="icon-badge icon-ok">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#48c78e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <h1>Download the latest +downloads</h1>
+    {% if builds %}
+    <p class="sub">You're an existing customer &mdash; updates are always free. Pick your platform to grab the newest version.</p>
+    <div class="dl-btns">
+      {% for b in builds %}
+      <a class="dl-btn {% if b.os == detected_os %}primary{% endif %}" href="/desktop/update?os={{ b.os }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download for {{ b.label }}
+      </a>
+      {% endfor %}
+    </div>
+    <p class="helper">Free updates forever &mdash; bookmark this link or watch your inbox when a new version ships.</p>
+    {% else %}
+    <p class="sub">No builds are available right now &mdash; please check back shortly.</p>
+    {% endif %}
     {% elif state == 'pending' %}
     <div class="spinner" id="spinner"></div>
     <h1 id="pending-title">Finalizing your purchase</h1>
@@ -3861,6 +3880,30 @@ def desktop_redeem_download():
     if not used.get("valid"):
         return redirect(f"/desktop/redeem?token={quote(token)}", code=302)
     return send_file(path, as_attachment=True, download_name=fn)
+
+
+@app.get("/desktop/update")
+def desktop_update():
+    """Free-update download for existing customers. No token — the link is only
+    distributed via the Kit broadcast to the desktop-customer segment."""
+    os_key = request.args.get("os", "")
+    if os_key:
+        if os_key not in _OS_ORDER:
+            abort(400)
+        fn = _load_builds_manifest().get(os_key) or ""
+        path = DESKTOP_BUILDS_DIR / fn if fn else None
+        if not fn or not path.exists():
+            abort(404)
+        return send_file(path, as_attachment=True, download_name=fn)
+    detected = _detect_os(request.headers.get("User-Agent", ""))
+    return render_template_string(
+        _DESKTOP_REDEEM_HTML,
+        state="update",
+        message="",
+        token="",
+        builds=_redeem_build_options(detected),
+        detected_os=detected,
+    )
 
 @app.post("/start")
 def start():
