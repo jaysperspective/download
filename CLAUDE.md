@@ -1,6 +1,6 @@
 # +downloads — codebase notes for Claude
 
-A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $7 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live.
+A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $1.99 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live.
 
 ## Project shape
 
@@ -39,7 +39,7 @@ If new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), keep 
 ## Two products, one payment app
 
 - **Online tool** (`/`): metered, token = N download credits. Two SKUs ($1/3-downloads, $5/10-downloads), both → `https://joshuaisaiah.art/payment/access`. **The free web service is permanently paused** — the online tool now requires a purchased token (paste it into the inline Insert-Token entry).
-- **Desktop app** ($7 one-time, free updates forever, macOS/Windows/Linux):
+- **Desktop app** ($1.99 one-time, free updates forever, macOS/Windows/Linux):
   - **Buy:** landing-page Buy buttons → `/desktop/buy` → 302 → `DESKTOP_PAYMENT_URL` (payment app's `?product=desktop` checkout).
   - **Redeem:** after Stripe checkout the buyer lands on `/desktop/redeem?token=…` → Mac/Windows/Linux download buttons (UA-detected default first) → `/desktop/redeem/download` consumes one of the token's 5 credits and serves the installer. **Pay-to-download model** — no in-app license check; installers are freely shareable.
   - **Free updates:** when a new version ships, installers are replaced on the server and a Kit broadcast goes to the **whole mailing list** linking to **`/desktop/update`** — a token-less page serving the latest installers. The 5 redeem credits are a re-download buffer for the purchased version; updates ride the `/desktop/update` channel.

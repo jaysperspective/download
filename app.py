@@ -1076,7 +1076,7 @@ HTML = r"""
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="+downloads">
-  <meta name="description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and more. Use it online or get the desktop app for unlimited downloads — $7 one-time, free updates forever. macOS, Windows and Linux.">
+  <meta name="description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and more. Use it online or get the desktop app for unlimited downloads — $1.99 one-time, free updates forever. macOS, Windows and Linux.">
   <link rel="manifest" href="/static/manifest.json">
   <title>+downloads — Save anything you can stream</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -1611,7 +1611,7 @@ HTML = r"""
       <button class="nav-link" onclick="document.getElementById('downloader').scrollIntoView({behavior:'smooth',block:'center'})">Online</button>
       <a href="#features">Features</a>
       <a href="#faq">FAQ</a>
-      <a class="pill" href="/desktop/buy">Buy Desktop · $7</a>
+      <a class="pill" href="/desktop/buy">Buy Desktop · $1.99</a>
     </nav>
   </header>
 
@@ -1625,7 +1625,7 @@ HTML = r"""
         <div>
           <a class="btn-buy large" href="/desktop/buy">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Buy +downloads — $7
+            Buy +downloads — $1.99
           </a>
         </div>
         <div class="trust-row">
@@ -1737,7 +1737,7 @@ HTML = r"""
         <h2 class="faq-title">Common questions</h2>
         <details>
           <summary>What's the difference between the online tool and the desktop app?</summary>
-          <div class="faq-body">The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $7 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server.</div>
+          <div class="faq-body">The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $1.99 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server.</div>
         </details>
         <details>
           <summary>Are updates really free forever?</summary>
@@ -1776,11 +1776,11 @@ HTML = r"""
 
       <!-- Final CTA -->
       <div class="final-cta">
-        <h3>Seven bucks. Every future update. Done.</h3>
+        <h3>Two bucks. Every future update. Done.</h3>
         <p>Stop fighting with free-trial walls and per-download tokens.</p>
         <a class="btn-buy large" href="/desktop/buy">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Get +downloads — $7
+          Get +downloads — $1.99
         </a>
       </div>
     </div>
