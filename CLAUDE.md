@@ -1,31 +1,28 @@
 # +downloads — codebase notes for Claude
 
-A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion desktop app is on sale at $7 one-time; the buy/redeem flow is wired through the payment app (installer file-serving still deferred — see "Deferred work" below).
+A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $7 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live.
 
 ## Project shape
 
-**One file does almost everything.** `app.py` is ~3200 lines: Flask routes, job runner, queue/dispatcher, token gate, history, admin, and **four large inline HTML templates as Python string constants**. Do not split into modules unless explicitly asked — the user prefers the single-file layout.
+**One file does almost everything.** `app.py` is ~3800 lines: Flask routes, job runner, queue/dispatcher, token gate, page-view analytics, history, admin, and **four large inline HTML templates as Python string constants**. Do not split into modules unless explicitly asked — the user prefers the single-file layout.
 
 Important globals & locations (verify line numbers before quoting — file is actively edited):
 
 - **HTML templates** (giant string constants near the top of the file):
-  - `HTML` — landing page at `/`. Uses `r"""..."""` (raw string) so JS `\n` and regex backslashes survive Python parsing.
+  - `HTML` — landing page at `/`. Uses `r"""..."""` (raw string) so JS `\n` and regex backslashes survive Python parsing. The desktop product section leads the page; the online tool sits below it.
   - `ADMIN_HTML` — `/admin`. Standard `"""..."""`.
   - `_LEGAL_PAGE_TEMPLATE` + `_PRIVACY_BODY` + `_TERMS_BODY` — `/privacy` and `/terms`.
-  - `_DESKTOP_REDEEM_HTML` — `/desktop/redeem` post-purchase page (confirmed / pending / error states; polls `/desktop/redeem/status` to clear the Stripe-redirect/webhook race).
-- **Token gate** (~line 75–200): `_is_token_valid()` and `_consume_token()` call out to a separate payment app via `PAYMENT_APP_URL/payment/api/access/internal/token/{check,use}`, authed with `TOKEN_INTERNAL_SECRET` (`x-internal-secret` header). `_check_token_status()` is the uncached variant that returns the full check JSON (`product`, `reason`) for the desktop redeem flow. User-facing checkout URLs are `ACCESS_PAYMENT_URL` (online tool) and `DESKTOP_PAYMENT_URL` (desktop app, defaults to `ACCESS_PAYMENT_URL?product=desktop`).
+  - `_DESKTOP_REDEEM_HTML` — shared template for `/desktop/redeem` (confirmed / pending / error states) and `/desktop/update` (the `update` state).
+- **Token gate** (~line 75–200): `_is_token_valid()` / `_consume_token()` call the payment app at `PAYMENT_APP_URL/payment/api/access/internal/token/{check,use}`, authed with `TOKEN_INTERNAL_SECRET` (`x-internal-secret` header). `_check_token_status()` is the uncached variant returning the full check JSON (`product`, `reason`). Checkout URLs: `ACCESS_PAYMENT_URL` (online), `DESKTOP_PAYMENT_URL` (desktop, defaults to `ACCESS_PAYMENT_URL?product=desktop`).
+- **Desktop paywall**: `/desktop/buy` (302 → checkout) · `/desktop/redeem` (post-purchase, token-gated, polls `/desktop/redeem/status` for the webhook race) · `/desktop/redeem/download` (consumes a credit, serves the installer) · `/desktop/update` (token-less free-update download). Installers resolve via `_load_builds_manifest()` from `DESKTOP_BUILDS_DIR`.
+- **Page-view analytics**: first-party, no cookies/IPs. SQLite at `ANALYTICS_DB` (under the state dir, gitignored). `_record_pageview()` runs inside `add_security_headers` for an allowlist of pages; `_pageview_analytics()` aggregates for `/admin`; rows pruned after 90 days.
 - **Job lifecycle**: `start()` → `dispatcher()` → `run_job()` → status polled via `/status/<job_id>` → download via `/download/<job_id>`.
 
 ## Editing the landing page
 
-The `HTML` constant is ~1230 lines of HTML/CSS/JS embedded in a Python raw triple-quoted string. **Do not try to replace it with a 1000-line `old_string` Edit** — it's too big. Pattern that works:
+The `HTML` constant is ~1400 lines of HTML/CSS/JS in a Python raw triple-quoted string. **Do not replace it with a giant `old_string` Edit.** For large swaps, write the new body to a temp file and use a Python regex script (`^HTML = r?"""\n.*?\n"""\n`); for small changes, targeted Edits with unique anchors are fine. Always `python3 -c "import ast; ast.parse(open('app.py').read())"` after, then restart the dev server and `curl /`.
 
-1. Write the new HTML to `/tmp/new_index.html` with `Write`.
-2. Run a small Python script via `Bash` that regex-matches `^HTML = r?"""\n.*?\n"""\n` and swaps the body.
-3. `python3 -c "import ast; ast.parse(open('app.py').read())"` to sanity-check the result.
-4. Restart the dev server, `curl /` to verify.
-
-If the new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), keep `r"""..."""`. If you switch to non-raw `"""`, you must double-escape (`\\n`). The previous commit *"Fix banner JS: escape \n in non-raw HTML template string"* exists because someone forgot this.
+If new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), keep `r"""..."""`. Non-raw `"""` requires double-escaping (`\\n`).
 
 ## Brand & UI conventions
 
@@ -37,12 +34,20 @@ If the new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), k
   - Purple accent: `#9b3adb` (used for the "best value" $5/10-downloads card)
   - BG: `#1a1818`, Card: `#242222`, Border: `#2e2c2c`
   - Status: success `#48c78e`, error `#ff6b6b`
-- Favicon is now `static/favicon.svg` (pink `+` on dark rounded ground). `favicon.png` / `icon-192.png` / `icon-512.png` are PNG fallbacks generated from the SVG via `sips`. If you regenerate the SVG, regenerate all three PNGs.
+- Favicon is `static/favicon.svg` (pink `+` on dark rounded ground). `favicon.png` / `icon-192.png` / `icon-512.png` are PNG fallbacks generated from the SVG via `sips`. If you regenerate the SVG, regenerate all three PNGs.
 
 ## Two products, one payment app
 
-- **Online tool** (`/`): metered. Token = N download credits. Two SKUs: $1/3-downloads, $5/10-downloads. Both link to `https://joshuaisaiah.art/payment/access`. Users either paste a token into the inline Insert-Token entry, or buy one and get it emailed.
-- **Desktop app** ($7 one-time, free updates forever, macOS/Windows/Linux): the four landing-page Buy buttons point at `/desktop/buy`, which `302`-redirects to `DESKTOP_PAYMENT_URL` (the payment app's `?product=desktop` checkout). After Stripe checkout the buyer lands on `/desktop/redeem?token=…` — it validates the desktop token via `_check_token_status()` and, when confirmed, shows Mac/Windows/Linux download buttons (UA-detected default first). Each button hits `/desktop/redeem/download?token=…&os=…`, which `_consume_token()`s one of the 5 credits and `send_file()`s the matching installer from `DESKTOP_BUILDS_DIR` (resolved through `manifest.json`). Installers are uploaded/removed from the **Installer Builds** card on `/admin`. The desktop token starts at 5 credits so re-downloads work. The webhook race (`exhausted` right after redirect) is handled by the redeem page polling `/desktop/redeem/status`.
+- **Online tool** (`/`): metered, token = N download credits. Two SKUs ($1/3-downloads, $5/10-downloads), both → `https://joshuaisaiah.art/payment/access`. **The free web service is permanently paused** — the online tool now requires a purchased token (paste it into the inline Insert-Token entry).
+- **Desktop app** ($7 one-time, free updates forever, macOS/Windows/Linux):
+  - **Buy:** landing-page Buy buttons → `/desktop/buy` → 302 → `DESKTOP_PAYMENT_URL` (payment app's `?product=desktop` checkout).
+  - **Redeem:** after Stripe checkout the buyer lands on `/desktop/redeem?token=…` → Mac/Windows/Linux download buttons (UA-detected default first) → `/desktop/redeem/download` consumes one of the token's 5 credits and serves the installer. **Pay-to-download model** — no in-app license check; installers are freely shareable.
+  - **Free updates:** when a new version ships, installers are replaced on the server and a Kit broadcast goes to the **whole mailing list** linking to **`/desktop/update`** — a token-less page serving the latest installers. The 5 redeem credits are a re-download buffer for the purchased version; updates ride the `/desktop/update` channel.
+  - **Builds:** the three installers + `manifest.json` live in `DESKTOP_BUILDS_DIR`. Admins upload/remove them via the **Installer Builds** card on `/admin`, or installers are `scp`'d directly into the server's bind-mounted `~/yt-web-ui/desktop-builds/`. No app restart needed — routes read `manifest.json` live.
+
+## Admin (`/admin`)
+
+Password-gated by `YT_UI_COOKIES_PASSWORD` (503 if unset). "Load Stats" (`POST /admin/stats`) renders the page-view dashboard (stat cards, 30-day bar chart, top pages, recent views), the Installer Builds management card, and download stats. Cookie upload and service-pause controls are always visible.
 
 ## Running locally
 
@@ -51,9 +56,9 @@ pip install -r requirements.txt    # flask + gunicorn only
 python app.py                       # dev server on 127.0.0.1:5055
 ```
 
-`DOWNLOAD_DIR` and `YT_UI_STATE_DIR` default to `~/Downloads` style paths but can be redirected (e.g. `DOWNLOAD_DIR=/tmp/yt_smoke_dl YT_UI_STATE_DIR=/tmp/yt_smoke_state python app.py`) for isolated smoke tests. The port defaults to `5055` but honors a `PORT` env var, so a smoke-test instance can run alongside a server already on 5055.
+`DOWNLOAD_DIR` and `YT_UI_STATE_DIR` can be redirected (e.g. `DOWNLOAD_DIR=/tmp/yt_smoke_dl YT_UI_STATE_DIR=/tmp/yt_smoke_state python app.py`) for isolated smoke tests. The port defaults to `5055` but honors a `PORT` env var, so a smoke-test instance can run alongside a server already on 5055.
 
-Production runs in Docker via `docker-compose.yml` on a DigitalOcean droplet. SSH access and deploy steps are in the [server access memory](~/.claude/projects/-Users-joshuaharrington-yt-web-ui/memory/reference_server_access.md).
+Production runs in Docker via `docker-compose.yml` on a DigitalOcean droplet. **The container uses `network_mode: host`** — required so it can reach the payment app on the host's `127.0.0.1:4001`: the payment app's internal API binds loopback only, and its public hostname is behind Cloudflare which 403s scripted requests. `PAYMENT_APP_URL` must therefore be `http://127.0.0.1:4001` in prod. The `desktop-builds/` dir is bind-mounted to `/data/desktop-builds`. SSH access and deploy steps are in the [server access memory](~/.claude/projects/-Users-joshuaharrington-yt-web-ui/memory/reference_server_access.md).
 
 ## YouTube cookies
 
@@ -63,10 +68,10 @@ Production runs in Docker via `docker-compose.yml` on a DigitalOcean droplet. SS
 
 - Single-file architecture — don't refactor `app.py` into modules unprompted.
 - HTML strings are big and edited by hand — don't introduce Jinja includes or external template files unless asked.
-- The token system is the source of truth for access — don't add parallel paywall logic. Funnel new SKUs through the existing payment app's internal endpoints.
+- The token system is the source of truth for access — don't add parallel paywall logic. Funnel new SKUs through the payment app's internal endpoints.
 - Keep the brand pink as the only saturated UI color. The gold and purple are accents.
-- Don't add a version badge, "powered by" footer, or third-party analytics.
+- Don't add a version badge or "powered by" footer. First-party page-view counting exists; don't add third-party analytics SDKs.
 
 ## Known limitations
 
-- **Exhausted vs. pending desktop tokens are indistinguishable.** The payment app returns the same `{valid:false, reason:"exhausted"}` for a not-yet-activated token (webhook race) and a fully-used token (all 5 download credits spent). `/desktop/redeem` treats both as "pending" and polls; the genuine race resolves in seconds, a truly-exhausted token never resolves and settles on a support message. A clean fix needs the payment app to expose an `activated` flag or the live `remaining` count.
+- **Exhausted vs. pending desktop tokens are indistinguishable.** The payment app returns the same `{valid:false, reason:"exhausted"}` for a not-yet-activated token (webhook race) and a fully-used one (5 redeem credits spent). `/desktop/redeem` treats both as "pending" and polls — the genuine race resolves in seconds; a truly-exhausted token settles on a support message. A clean fix needs the payment app to expose an `activated` flag or live `remaining`. Low impact in practice: free updates go through token-less `/desktop/update`, so redeem credits rarely exhaust.

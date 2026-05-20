@@ -1620,7 +1620,7 @@ HTML = r"""
     <div class="container">
       <div class="product-hero">
         <span class="product-eyebrow">+downloads for Desktop</span>
-        <h2>Skip the queue. <span class="grad">Own the tool.</span></h2>
+        <h2>Own the tool. <span class="grad">No subscriptions.</span></h2>
         <p>Unlimited downloads, batch jobs, 4K video and lossless audio — all running locally on your Mac or PC. No tokens, no waits, no limits.</p>
         <div>
           <a class="btn-buy large" href="/desktop/buy">
