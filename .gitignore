@@ -19,6 +19,8 @@ downloads.spec
 history.json
 jobs.json
 job-logs/
+analytics.db
+desktop-builds/
 
 # OS / editor
 .DS_Store

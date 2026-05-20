@@ -5,6 +5,7 @@ services:
     volumes:
       - downloads:/data
       - ./cookies.txt:/cookies.txt
+      - ./desktop-builds:/data/desktop-builds
     environment:
       - YT_UI_COOKIES_PASSWORD=${YT_UI_COOKIES_PASSWORD}
       - YT_UI_COOKIES=/cookies.txt
@@ -26,6 +27,7 @@ services:
       - TOKEN_INTERNAL_SECRET=${TOKEN_INTERNAL_SECRET}
       - PAYMENT_APP_URL=${PAYMENT_APP_URL:-http://host.docker.internal:4001}
       - ACCESS_PAYMENT_URL=${ACCESS_PAYMENT_URL}
+      - DESKTOP_BUILDS_DIR=/data/desktop-builds
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

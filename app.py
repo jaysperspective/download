@@ -10,8 +10,8 @@ import socket
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
-from flask import Flask, request, jsonify, send_from_directory, send_file, render_template_string, abort, after_this_request, make_response
+from urllib.parse import urlparse, parse_qs, quote
+from flask import Flask, request, jsonify, send_from_directory, send_file, render_template_string, abort, after_this_request, make_response, redirect
 import sys
 import zipfile
 import base64
@@ -20,8 +20,10 @@ import urllib.request
 import urllib.error
 import tempfile
 import shutil
+import sqlite3
 import smtplib
 from email.mime.text import MIMEText
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
@@ -43,6 +45,90 @@ JOBS_PATH    = _data_dir / "jobs.json"
 PAUSE_PATH   = _data_dir / "pause.json"
 LOG_DIR      = _data_dir / "job-logs"
 LOG_DIR.mkdir(exist_ok=True)
+
+# First-party page-view analytics. Server-side counts only — no cookies, no IP
+# storage — so it stays compatible with the "no user-tracking" privacy policy.
+ANALYTICS_DB = _data_dir / "analytics.db"
+_analytics_lock = threading.Lock()
+_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/privacy", "/terms"}
+PAGEVIEW_RETENTION_DAYS = 90
+
+def _analytics_conn():
+    return sqlite3.connect(ANALYTICS_DB, timeout=5)
+
+def _init_analytics_db():
+    with _analytics_lock, _analytics_conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pageviews ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "path TEXT NOT NULL, created_at INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pageviews_created ON pageviews(created_at)")
+
+_init_analytics_db()
+
+def _record_pageview(path: str):
+    try:
+        with _analytics_lock, _analytics_conn() as conn:
+            conn.execute(
+                "INSERT INTO pageviews (path, created_at) VALUES (?, ?)",
+                (path, int(time.time())),
+            )
+    except Exception:
+        pass
+
+def _prune_pageviews():
+    try:
+        cutoff = int(time.time()) - PAGEVIEW_RETENTION_DAYS * 86400
+        with _analytics_lock, _analytics_conn() as conn:
+            conn.execute("DELETE FROM pageviews WHERE created_at < ?", (cutoff,))
+    except Exception:
+        pass
+
+def _pageview_analytics() -> dict:
+    """Aggregate page-view counts for the admin dashboard."""
+    now = int(time.time())
+    today_start = now - (now % 86400)          # UTC midnight today
+    week_start = today_start - 6 * 86400       # last 7 days, inclusive
+    month_start = today_start - 29 * 86400     # last 30 days, inclusive
+    out = {"total": 0, "today": 0, "week": 0, "month": 0, "daily": [], "by_path": [], "recent": []}
+    try:
+        conn = _analytics_conn()
+        try:
+            cur = conn.cursor()
+            out["total"] = cur.execute("SELECT COUNT(*) FROM pageviews").fetchone()[0]
+            out["today"] = cur.execute("SELECT COUNT(*) FROM pageviews WHERE created_at >= ?", (today_start,)).fetchone()[0]
+            out["week"] = cur.execute("SELECT COUNT(*) FROM pageviews WHERE created_at >= ?", (week_start,)).fetchone()[0]
+            out["month"] = cur.execute("SELECT COUNT(*) FROM pageviews WHERE created_at >= ?", (month_start,)).fetchone()[0]
+            rows = cur.execute(
+                "SELECT created_at - (created_at % 86400) AS day, COUNT(*) "
+                "FROM pageviews WHERE created_at >= ? GROUP BY day", (month_start,)
+            ).fetchall()
+            day_counts = {int(d): c for d, c in rows}
+            for i in range(29, -1, -1):
+                d = today_start - i * 86400
+                out["daily"].append({
+                    "date": time.strftime("%Y-%m-%d", time.gmtime(d)),
+                    "count": day_counts.get(d, 0),
+                })
+            out["by_path"] = [
+                {"path": p, "count": c}
+                for p, c in cur.execute(
+                    "SELECT path, COUNT(*) AS c FROM pageviews WHERE created_at >= ? "
+                    "GROUP BY path ORDER BY c DESC", (month_start,)
+                ).fetchall()
+            ]
+            out["recent"] = [
+                {"path": p, "ts": t}
+                for p, t in cur.execute(
+                    "SELECT path, created_at FROM pageviews ORDER BY id DESC LIMIT 50"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return out
 
 MAX_CONCURRENT_JOBS = int(os.environ.get("YT_UI_MAX_CONCURRENT", "3"))
 JOB_TTL_SECONDS = int(os.environ.get("YT_UI_JOB_TTL_SECONDS", str(60 * 60)))
@@ -76,6 +162,9 @@ _spotify_token_lock = threading.Lock()
 PAYMENT_APP_URL = os.environ.get("PAYMENT_APP_URL", "http://localhost:4001")
 TOKEN_INTERNAL_SECRET = os.environ.get("TOKEN_INTERNAL_SECRET", "")
 ACCESS_PAYMENT_URL = os.environ.get("ACCESS_PAYMENT_URL", "http://localhost:4001/payment/access")
+DESKTOP_PAYMENT_URL = os.environ.get("DESKTOP_PAYMENT_URL", f"{ACCESS_PAYMENT_URL}?product=desktop")
+DESKTOP_BUILDS_DIR = Path(os.environ.get("DESKTOP_BUILDS_DIR") or (_data_dir / "desktop-builds"))
+DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _load_paused() -> bool:
     try:
@@ -167,6 +256,99 @@ def _consume_token(token: str) -> dict:
     with _valid_token_cache_lock:
         _valid_token_cache.pop(token, None)
     return result if isinstance(result, dict) else {}
+
+def _check_token_status(token: str) -> dict:
+    """Call the payment-app check endpoint and return the full JSON (valid, remaining, product, reason).
+
+    Unlike _is_token_valid this exposes 'product' and 'reason', which the desktop
+    redeem flow needs. Not cached — the redeem page polls this to clear the
+    Stripe-redirect/webhook race, so it must see fresh state every call.
+    """
+    if not token or not TOKEN_INTERNAL_SECRET:
+        return {}
+    try:
+        body = json.dumps({"token": token}).encode()
+        req = urllib.request.Request(
+            f"{PAYMENT_APP_URL}/payment/api/access/internal/token/check",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-internal-secret": TOKEN_INTERNAL_SECRET,
+                "x-forwarded-proto": "https",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            result = json.loads(resp.read())
+    except Exception:
+        return {}
+    return result if isinstance(result, dict) else {}
+
+# Desktop installer builds — manifest maps each OS slot to a filename in DESKTOP_BUILDS_DIR.
+_OS_ORDER = ("mac", "win", "linux")
+_OS_LABELS = {"mac": "macOS", "win": "Windows", "linux": "Linux"}
+
+def _builds_manifest_path() -> Path:
+    return DESKTOP_BUILDS_DIR / "manifest.json"
+
+def _load_builds_manifest() -> dict:
+    try:
+        m = json.loads(_builds_manifest_path().read_text())
+        if isinstance(m, dict):
+            return m
+    except Exception:
+        pass
+    return {}
+
+def _save_builds_manifest(m: dict):
+    DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
+    _builds_manifest_path().write_text(json.dumps(m, indent=2))
+
+def _list_desktop_builds() -> dict:
+    """Per-OS build slots for the admin page: {os: {filename, size} or None}."""
+    m = _load_builds_manifest()
+    slots = {}
+    for os_key in _OS_ORDER:
+        fn = m.get(os_key) or ""
+        info = None
+        if fn:
+            p = DESKTOP_BUILDS_DIR / fn
+            if p.exists():
+                info = {"filename": fn, "size": p.stat().st_size}
+        slots[os_key] = info
+    return slots
+
+def _maybe_delete_build_file(filename: str, manifest: dict):
+    """Delete a build file once no manifest slot still references it."""
+    if not filename or filename in {manifest.get(k) for k in _OS_ORDER}:
+        return
+    try:
+        p = DESKTOP_BUILDS_DIR / filename
+        if p.exists() and p.parent == DESKTOP_BUILDS_DIR:
+            p.unlink()
+    except Exception:
+        pass
+
+def _detect_os(ua: str) -> str:
+    """Best-effort desktop OS from a User-Agent string. Empty for mobile/unknown."""
+    ua = (ua or "").lower()
+    if "windows" in ua:
+        return "win"
+    if "android" in ua or "iphone" in ua or "ipad" in ua:
+        return ""
+    if "mac" in ua:
+        return "mac"
+    if "linux" in ua or "x11" in ua:
+        return "linux"
+    return ""
+
+def _redeem_build_options(detected: str) -> list:
+    """Available download options for the redeem page, detected OS listed first."""
+    slots = _list_desktop_builds()
+    avail = [k for k in _OS_ORDER if slots.get(k)]
+    if detected in avail:
+        avail = [detected] + [k for k in avail if k != detected]
+    return [{"os": k, "label": _OS_LABELS[k]} for k in avail]
 
 YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
@@ -280,7 +462,8 @@ ADMIN_HTML = """
 <head>
   <meta charset="utf-8">
   <title>+downloads / admin</title>
-  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -402,9 +585,47 @@ ADMIN_HTML = """
       cursor: pointer; transition: color 0.15s, border-color 0.15s;
     }
     .refresh-btn:hover { color: #f0eef0; border-color: #555; }
+    .c-amber { color: #bf9b3a; }
+
+    /* Installer builds */
+    .build-row { padding: 14px 0; border-bottom: 1px solid #222; }
+    .build-row:first-of-type { padding-top: 2px; }
+    .build-row:last-of-type { border-bottom: none; padding-bottom: 2px; }
+    .build-top { display: flex; align-items: baseline; gap: 10px; margin-bottom: 9px; }
+    .build-os { font-size: 14px; font-weight: 700; color: #f0eef0; }
+    .build-cur { font-size: 12px; word-break: break-all; }
+    .build-cur.ok { color: #4caf7d; }
+    .build-cur.none { color: #555; }
+    .build-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .build-actions input[type=file] { flex: 1; min-width: 170px; padding: 8px 10px; font-size: 13px; }
+    .build-btn { padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; border: none; }
+    .build-btn.up { background: #db52a6; color: #fff; }
+    .build-btn.up:hover { background: #c9479a; }
+    .build-btn.del { background: #1a1818; color: #e05c5c; border: 1px solid #e05c5c; }
+    .build-btn.del:hover { background: rgba(224,92,92,0.08); }
+    #build-msg { margin-top: 12px; font-size: 13px; font-weight: 600; min-height: 16px; }
+
+    /* Page-view analytics */
+    .section-head { font-size: 15px; font-weight: 800; color: #f0eef0; margin: 30px 0 14px; }
+    .section-head:first-of-type { margin-top: 4px; }
+    .chart { display: flex; align-items: flex-end; gap: 3px; height: 150px; }
+    .chart-col { flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: flex-end; gap: 5px; height: 100%; }
+    .chart-bar { width: 100%; background: #db52a6; border-radius: 3px 3px 0 0; }
+    .chart-lbl { font-size: 9px; color: #555; white-space: nowrap; line-height: 1; }
+    .pv-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .bar-row { margin-bottom: 13px; }
+    .bar-row:last-child { margin-bottom: 0; }
+    .bar-head { display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 13px; margin-bottom: 5px; }
+    .bar-head .bp { color: #f0eef0; font-weight: 600; word-break: break-all; }
+    .bar-head .bc { color: #888; font-size: 12px; padding-left: 10px; }
+    .bar-track { height: 8px; background: #1a1818; border-radius: 99px; overflow: hidden; }
+    .bar-fill { height: 100%; background: #db52a6; border-radius: 99px; }
     @media (max-width: 600px) {
       .stat-grid { grid-template-columns: repeat(2, 1fr); }
       .url-cell { max-width: 140px; }
+      .pv-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -440,6 +661,65 @@ ADMIN_HTML = """
         <button class="refresh-btn" onclick="loadStats()">&#8635; Refresh</button>
       </div>
 
+      <div class="card">
+        <div class="card-title">Installer Builds</div>
+        <div class="build-row">
+          <div class="build-top">
+            <span class="build-os">macOS</span>
+            <span class="build-cur none" id="build-cur-mac">Load stats to view</span>
+          </div>
+          <div class="build-actions">
+            <input type="file" id="bf-mac">
+            <button class="build-btn up" onclick="uploadBuild('mac')">Upload</button>
+            <button class="build-btn del" id="build-del-mac" onclick="deleteBuild('mac')" style="display:none">Delete</button>
+          </div>
+        </div>
+        <div class="build-row">
+          <div class="build-top">
+            <span class="build-os">Windows</span>
+            <span class="build-cur none" id="build-cur-win">Load stats to view</span>
+          </div>
+          <div class="build-actions">
+            <input type="file" id="bf-win">
+            <button class="build-btn up" onclick="uploadBuild('win')">Upload</button>
+            <button class="build-btn del" id="build-del-win" onclick="deleteBuild('win')" style="display:none">Delete</button>
+          </div>
+        </div>
+        <div class="build-row">
+          <div class="build-top">
+            <span class="build-os">Linux</span>
+            <span class="build-cur none" id="build-cur-linux">Load stats to view</span>
+          </div>
+          <div class="build-actions">
+            <input type="file" id="bf-linux">
+            <button class="build-btn up" onclick="uploadBuild('linux')">Upload</button>
+            <button class="build-btn del" id="build-del-linux" onclick="deleteBuild('linux')" style="display:none">Delete</button>
+          </div>
+        </div>
+        <div id="build-msg"></div>
+      </div>
+
+      <div class="section-head">Page Views</div>
+      <div class="stat-grid" id="pv-grid"></div>
+      <div class="card">
+        <div class="card-title">Daily Views &middot; Last 30 Days</div>
+        <div class="chart" id="pv-chart"></div>
+      </div>
+      <div class="pv-row">
+        <div class="card">
+          <div class="card-title">Top Pages &middot; Last 30 Days</div>
+          <div id="pv-paths"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Recent Views</div>
+          <table class="tbl">
+            <thead><tr><th>Time</th><th>Page</th></tr></thead>
+            <tbody id="pv-recent"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="section-head">Downloads</div>
       <div class="stat-grid" id="stat-grid"></div>
 
       <div class="card">
@@ -595,6 +875,8 @@ ADMIN_HTML = """
 
     function renderStats(d) {
       document.getElementById('stats-section').style.display = 'block';
+      renderPageviews(d.pageviews);
+      renderBuilds(d.builds);
 
       // Summary cards
       const total    = d.total_history;
@@ -660,14 +942,133 @@ ADMIN_HTML = """
     function escHtml(s) {
       return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
+
+    function pvCard(label, val, cls, sub) {
+      return '<div class="stat-card"><div class="stat-label">' + label + '</div>'
+        + '<div class="stat-val ' + cls + '">' + val + '</div>'
+        + '<div class="stat-sub">' + (sub || '&nbsp;') + '</div></div>';
+    }
+
+    function relTimeTs(ts) {
+      if (!ts) return '—';
+      var diff = Math.floor(Date.now() / 1000 - ts);
+      if (diff < 60)    return diff + 's ago';
+      if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
+      if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+      return Math.floor(diff / 86400) + 'd ago';
+    }
+
+    function renderPageviews(pv) {
+      if (!pv) return;
+      document.getElementById('pv-grid').innerHTML =
+          pvCard('Total Views', pv.total, 'c-pink', 'all time')
+        + pvCard('Today', pv.today, 'c-green', '')
+        + pvCard('This Week', pv.week, 'c-blue', 'last 7 days')
+        + pvCard('This Month', pv.month, 'c-amber', 'last 30 days');
+
+      var daily = pv.daily || [];
+      var dmax = 1;
+      daily.forEach(function (d) { if (d.count > dmax) dmax = d.count; });
+      document.getElementById('pv-chart').innerHTML = daily.map(function (d, i) {
+        var h = Math.round((d.count / dmax) * 100);
+        var lbl = (i % 5 === 0) ? d.date.slice(5) : '&nbsp;';
+        var bar = '<div class="chart-bar" style="height:' + h + '%' + (d.count > 0 ? ';min-height:2px' : '') + '"></div>';
+        return '<div class="chart-col" title="' + d.date + ': ' + d.count + ' views">'
+          + bar + '<div class="chart-lbl">' + lbl + '</div></div>';
+      }).join('');
+
+      var paths = pv.by_path || [];
+      var pmax = 1;
+      paths.forEach(function (p) { if (p.count > pmax) pmax = p.count; });
+      document.getElementById('pv-paths').innerHTML = paths.length
+        ? paths.map(function (p) {
+            var w = Math.round((p.count / pmax) * 100);
+            return '<div class="bar-row"><div class="bar-head">'
+              + '<span class="bp">' + escHtml(p.path) + '</span>'
+              + '<span class="bc">' + p.count + '</span></div>'
+              + '<div class="bar-track"><div class="bar-fill" style="width:' + w + '%"></div></div></div>';
+          }).join('')
+        : '<span style="color:#555;font-size:13px">No views yet</span>';
+
+      var recent = pv.recent || [];
+      document.getElementById('pv-recent').innerHTML = recent.length
+        ? recent.map(function (r) {
+            return '<tr><td class="time-cell">' + relTimeTs(r.ts) + '</td>'
+              + '<td class="url-cell" style="color:#f0eef0">' + escHtml(r.path) + '</td></tr>';
+          }).join('')
+        : '<tr><td colspan="2" style="color:#555;padding:16px 0">No views yet</td></tr>';
+    }
+
+    function fmtBytes(n) {
+      if (!n) return '0 B';
+      var u = ['B', 'KB', 'MB', 'GB'], i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return n.toFixed(i ? 1 : 0) + ' ' + u[i];
+    }
+
+    function renderBuilds(builds) {
+      builds = builds || {};
+      ['mac', 'win', 'linux'].forEach(function (os) {
+        var slot = builds[os];
+        var cur = document.getElementById('build-cur-' + os);
+        var del = document.getElementById('build-del-' + os);
+        if (slot) {
+          cur.textContent = slot.filename + ' · ' + fmtBytes(slot.size);
+          cur.className = 'build-cur ok';
+          del.style.display = '';
+        } else {
+          cur.textContent = 'No build uploaded';
+          cur.className = 'build-cur none';
+          del.style.display = 'none';
+        }
+      });
+    }
+
+    async function uploadBuild(os) {
+      var msg = document.getElementById('build-msg');
+      var file = document.getElementById('bf-' + os).files[0];
+      if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
+      if (!file) { msg.textContent = 'Choose a ' + os + ' file first.'; msg.className = 'err'; return; }
+      msg.textContent = 'Uploading ' + file.name + '…'; msg.className = '';
+      try {
+        var fd = new FormData();
+        fd.append('password', pw());
+        fd.append('os', os);
+        fd.append('build', file);
+        var r = await fetch('/admin/builds/upload', { method: 'POST', body: fd });
+        var j = await r.json();
+        if (!r.ok) { msg.textContent = j.error || 'Upload failed.'; msg.className = 'err'; return; }
+        msg.textContent = 'Uploaded ' + j.filename; msg.className = 'ok';
+        document.getElementById('bf-' + os).value = '';
+        loadStats();
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+    }
+
+    async function deleteBuild(os) {
+      var msg = document.getElementById('build-msg');
+      if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
+      if (!confirm('Remove the ' + os + ' build?')) return;
+      msg.textContent = 'Removing…'; msg.className = '';
+      try {
+        var r = await fetch('/admin/builds/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw(), os: os })
+        });
+        var j = await r.json();
+        if (!r.ok) { msg.textContent = j.error || 'Delete failed.'; msg.className = 'err'; return; }
+        msg.textContent = 'Removed ' + os + ' build.'; msg.className = 'ok';
+        loadStats();
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+    }
   </script>
 </body>
 </html>
 """
 
-HTML = """
+HTML = r"""
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -675,74 +1076,126 @@ HTML = """
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="+downloads">
+  <meta name="description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and more. Use it online or get the desktop app for unlimited downloads — $7 one-time, free updates forever. macOS, Windows and Linux.">
   <link rel="manifest" href="/static/manifest.json">
-  <title>+downloads</title>
-  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <title>+downloads — Save anything you can stream</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5597587878564683"
      crossorigin="anonymous"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       background: #1a1818;
       color: #f0eef0;
       min-height: 100vh;
+      overflow-x: hidden;
     }
+    a { color: inherit; }
+
+    /* ── HEADER ───────────────────────────────────────────── */
     .header {
-      background: #242222;
+      background: rgba(26,24,24,0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
       border-bottom: 1px solid #2e2c2c;
       padding: 0 32px;
-      height: 62px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
+      height: 64px;
+      display: flex; align-items: center; gap: 14px;
+      position: sticky; top: 0; z-index: 50;
     }
-    .logo { font-size: 24px; font-weight: 800; color: #db52a6; letter-spacing: -0.5px; }
-    .version-badge {
-      font-size: 11px; background: #2a2828; color: #555;
-      padding: 3px 9px; border-radius: 999px; font-weight: 600;
+    .logo { font-size: 24px; font-weight: 800; color: #db52a6; letter-spacing: -0.5px; text-decoration: none; white-space: nowrap; }
+    .logo .lo-prefix { color: #f0eef0; font-weight: 700; margin-right: 4px; }
+    .nav { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+    .nav a, .nav .nav-link {
+      font-size: 13px; font-weight: 600; color: #888; text-decoration: none;
+      padding: 8px 12px; border-radius: 8px; transition: color 0.15s, background 0.15s;
+      cursor: pointer; background: transparent; border: none;
     }
-    .main {
-      max-width: 520px; margin: 0 auto; padding: 24px;
-      display: flex; flex-direction: column; gap: 20px;
+    .nav a:hover, .nav .nav-link:hover { color: #f0eef0; background: #242222; }
+    .nav .pill {
+      color: #1a1818; background: #bf9b3a; font-weight: 700;
+      padding: 8px 14px;
     }
-    .left-col { display: flex; flex-direction: column; min-width: 0; }
-    .card {
+    .nav .pill:hover { background: #d4ad42; color: #1a1818; }
+    .nav .buy-pill {
+      color: #fff; background: #db52a6; font-weight: 700;
+      padding: 8px 14px;
+    }
+    .nav .buy-pill:hover { background: #c9479a; color: #fff; }
+
+    /* ── HERO ─────────────────────────────────────────────── */
+    .hero {
+      position: relative;
+      padding: 56px 20px 48px;
+      text-align: center;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: ''; position: absolute; inset: 0;
+      background:
+        radial-gradient(circle at 25% 15%, rgba(219,82,166,0.18), transparent 45%),
+        radial-gradient(circle at 80% 35%, rgba(155,58,219,0.14), transparent 50%),
+        radial-gradient(circle at 50% 90%, rgba(191,155,58,0.10), transparent 55%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .hero-inner { position: relative; z-index: 1; max-width: 720px; margin: 0 auto; }
+    .hero-eyebrow {
+      display: inline-block; font-size: 12px; font-weight: 700;
+      color: #db52a6; letter-spacing: 0.12em; text-transform: uppercase;
+      background: rgba(219,82,166,0.10); border: 1px solid rgba(219,82,166,0.25);
+      padding: 5px 12px; border-radius: 999px; margin-bottom: 18px;
+    }
+    .hero-title {
+      font-size: clamp(34px, 5.2vw, 52px);
+      font-weight: 800; letter-spacing: -1.2px; line-height: 1.05;
+      color: #f0eef0; margin-bottom: 14px;
+    }
+    .hero-title .grad {
+      background: linear-gradient(95deg, #db52a6 0%, #c44e9a 40%, #bf9b3a 100%);
+      -webkit-background-clip: text; background-clip: text;
+      color: transparent;
+    }
+    .hero-sub {
+      font-size: clamp(15px, 1.8vw, 17px); color: #aaa6aa;
+      line-height: 1.55; margin: 0 auto 28px; max-width: 520px;
+    }
+
+    /* ── DOWNLOADER (in hero) ─────────────────────────────── */
+    .downloader {
+      max-width: 640px; margin: 0 auto;
       background: #242222; border: 1px solid #2e2c2c;
-      border-radius: 16px; padding: 22px 24px; margin-bottom: 16px;
+      border-radius: 18px; padding: 22px;
+      box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 0 1px rgba(219,82,166,0.05);
+      text-align: left;
     }
     .url-row { display: flex; gap: 10px; }
     input[type=text] {
       background: #1a1818; border: 1.5px solid #353333; color: #f0eef0;
-      padding: 13px 16px; border-radius: 10px; font-size: 15px;
+      padding: 14px 16px; border-radius: 11px; font-size: 15px;
       flex: 1; min-width: 0; outline: none;
       transition: border-color 0.2s, box-shadow 0.2s;
     }
-    input[type=text]:focus { border-color: #db52a6; box-shadow: 0 0 0 3px rgba(219,82,166,0.1); }
-    input::placeholder { color: #464444; }
+    input[type=text]:focus { border-color: #db52a6; box-shadow: 0 0 0 3px rgba(219,82,166,0.12); }
+    input::placeholder { color: #555; }
     .btn-primary {
       background: #db52a6; color: #fff; border: none;
-      padding: 13px 22px; border-radius: 10px; font-size: 15px; font-weight: 700;
+      padding: 14px 24px; border-radius: 11px; font-size: 15px; font-weight: 700;
       cursor: pointer; white-space: nowrap; flex-shrink: 0;
-      transition: background 0.15s, transform 0.1s;
+      transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+      display: inline-flex; align-items: center; gap: 8px;
     }
-    .btn-primary:hover { background: #c9479a; }
+    .btn-primary:hover { background: #c9479a; box-shadow: 0 6px 18px rgba(219,82,166,0.32); }
     .btn-primary:active { transform: scale(0.97); }
-    .btn-secondary {
-      background: #242222; color: #bf9b3a; border: 1.5px solid #353333;
-      padding: 11px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
-      cursor: pointer; white-space: nowrap; flex-shrink: 0;
-      transition: background 0.15s, border-color 0.15s;
+    .btn-primary:disabled { opacity: 0.55; cursor: default; transform: none; box-shadow: none; }
+    .btn-token {
+      background: #2a2828; color: #f0eef0; border: 1.5px solid #353333;
     }
-    .btn-secondary:hover { background: #2e2c2c; border-color: #bf9b3a; }
-    .btn-ghost {
-      background: transparent; color: #555; border: 1px solid #353333;
-      padding: 12px 15px; border-radius: 10px; font-size: 13px;
-      cursor: pointer; white-space: nowrap; flex-shrink: 0;
-      transition: color 0.15s, border-color 0.15s;
-    }
-    .btn-ghost:hover { color: #f0eef0; border-color: #555; }
+    .btn-token:hover { background: #2e2c2c; border-color: #db52a6; color: #db52a6; box-shadow: none; }
     .btn-cancel {
       background: transparent; color: #666; border: 1px solid #353333;
       padding: 5px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
@@ -755,23 +1208,64 @@ HTML = """
       padding: 12px 36px 12px 14px; border-radius: 10px; font-size: 14px;
       flex: 1; min-width: 0; outline: none; cursor: pointer;
       appearance: none; -webkit-appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='7' viewBox='0 0 12 7'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23555' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='7' viewBox='0 0 12 7'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23666' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
       background-repeat: no-repeat; background-position: right 13px center;
       transition: border-color 0.2s;
     }
-    select:focus { border-color: #db52a6; outline: none; }
+    select:focus { border-color: #db52a6; }
     #scOptions { display: none; margin-top: 12px; gap: 14px; align-items: center; flex-wrap: wrap; }
     #scOptions label { font-size: 13px; color: #888; display: flex; align-items: center; gap: 7px; cursor: pointer; }
     #scOptions select { padding: 8px 32px 8px 12px; font-size: 13px; flex: none; width: auto; }
     .note-pill {
-      display: none; margin-top: 12px;
+      display: none; margin-top: 10px;
       background: rgba(191,155,58,0.07); border: 1px solid rgba(191,155,58,0.18);
       border-radius: 8px; padding: 9px 14px; font-size: 13px; color: #bf9b3a; line-height: 1.5;
     }
-    .divider { height: 1px; background: #2a2828; margin: 18px 0; }
-    .token-row { display: flex; gap: 10px; }
-    .dir-label { font-size: 12px; color: #3e3c3c; margin-top: 10px; }
-    .dir-label b { color: #5a5858; font-weight: 500; }
+
+    /* ── Token entry (collapsible) ─────────────────────────── */
+    .token-area { margin-top: 12px; }
+    #token-input-row {
+      display: none; gap: 8px; align-items: center; margin-top: 4px;
+      animation: tokenSlide 0.25s ease-out;
+    }
+    #token-input-row.open { display: flex; }
+    @keyframes tokenSlide {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    #token-field {
+      flex: 1; background: #1a1818; border: 1.5px solid #2e2c2c;
+      border-radius: 10px; padding: 11px 14px; font-size: 13px;
+      font-family: 'SF Mono', monospace; color: #f0eef0; outline: none;
+      transition: border-color 0.15s;
+    }
+    #token-field:focus { border-color: #db52a6; }
+    #token-submit-btn {
+      background: #db52a6; color: #fff; border: none;
+      border-radius: 10px; padding: 11px 18px; font-size: 13px; font-weight: 700;
+      cursor: pointer; white-space: nowrap; transition: background 0.15s;
+    }
+    #token-submit-btn:hover { background: #c9479a; }
+    #token-submit-btn:disabled { opacity: 0.55; cursor: default; }
+    #token-error { display: none; font-size: 12px; color: #ff6b6b; margin-top: 8px; }
+    #token-unlocked {
+      display: none; align-items: center; gap: 10px;
+      background: rgba(72,199,142,0.07); border: 1px solid rgba(72,199,142,0.22);
+      border-radius: 10px; padding: 9px 14px; margin-top: 4px;
+    }
+    #token-unlocked span.lab {
+      font-size: 13px; color: #48c78e; font-weight: 600;
+    }
+    #token-unlocked span#token-remaining { font-size: 12px; color: #888; }
+    #token-unlocked button {
+      margin-left: auto; background: transparent; border: none; color: #666;
+      font-size: 11px; cursor: pointer; padding: 4px 8px; border-radius: 6px;
+    }
+    #token-unlocked button:hover { color: #e05c5c; }
+
+    /* ── Status / progress (collapsible) ───────────────────── */
+    .status-block { display: none; margin-top: 18px; padding-top: 18px; border-top: 1px solid #2a2828; }
+    .status-block.active { display: block; }
     .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
     #statusPill {
       padding: 5px 14px; border-radius: 999px;
@@ -806,17 +1300,14 @@ HTML = """
       pointer-events: none; z-index: 1;
     }
     #progressText { font-size: 12px; color: #777; margin-top: 8px; display: block; }
-    .phase-label {
-      font-size: 14px; font-weight: 600; color: #f0eef0;
-      margin: 6px 0 2px; letter-spacing: 0.2px;
-    }
-    .phase-note { font-size: 12px; color: #9a8f9a; margin-bottom: 8px; min-height: 0; }
+    .phase-label { font-size: 14px; font-weight: 600; color: #f0eef0; margin: 6px 0 2px; }
+    .phase-note { font-size: 12px; color: #9a8f9a; margin-bottom: 8px; }
     .phase-note.err { color: #ff8f8f; }
     pre#log {
       background: #141212; border: 1px solid #242222; border-radius: 10px;
       color: #776f77; padding: 10px 14px;
       font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace;
-      min-height: 0; max-height: 120px; overflow-y: auto;
+      max-height: 120px; overflow-y: auto;
       white-space: pre-wrap; word-break: break-all; line-height: 1.55; margin: 0;
       display: none;
     }
@@ -824,213 +1315,645 @@ HTML = """
     #meta { font-size: 13px; color: #777; margin-top: 10px; }
     #meta a { color: #db52a6; text-decoration: none; }
     #meta a:hover { text-decoration: underline; }
-    .section-label {
-      font-size: 11px; font-weight: 700; color: #444;
-      text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 14px;
-    }
-    .hist-empty { font-size: 13px; color: #444; padding: 16px 0; text-align: center; }
-    .hist-row {
-      display: flex; align-items: center; gap: 12px;
-      padding: 11px 14px; background: #1e1c1c; border: 1px solid #282626;
-      border-radius: 10px; margin-bottom: 7px; transition: border-color 0.15s;
-    }
-    .hist-row:hover { border-color: #353333; }
-    .hist-left { flex: 1; min-width: 0; overflow: hidden; }
-    .hist-main { font-size: 13px; color: #b8b0b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .hist-sub { font-size: 11px; color: #4a4848; margin-top: 3px; display: flex; gap: 6px; align-items: center; }
-    .hist-tag {
-      display: inline-block; background: #252323; color: #5a5858;
-      padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
-    }
-    .hist-status { font-size: 11px; font-weight: 600; }
-    .hist-status.done { color: #48c78e; }
-    .hist-status.error { color: #ff6b6b; }
-    .hist-status.cancelled { color: #555; }
-    .hist-btns { display: flex; gap: 6px; flex-shrink: 0; }
-    .hist-btn {
-      background: #252323; border: 1px solid #353333; color: #666;
-      padding: 5px 12px; border-radius: 7px; font-size: 12px; cursor: pointer;
-      white-space: nowrap; transition: color 0.15s, border-color 0.15s;
-    }
-    .hist-btn:hover { color: #db52a6; border-color: #db52a6; }
-    /* Paused banner */
+
+    /* Paused / buy-access banners */
     .paused-banner {
       display: none; background: #2a1a1a; border: 1.5px solid #e05c5c;
-      border-radius: 14px; padding: 18px 22px; margin-bottom: 16px;
-      text-align: center;
+      border-radius: 14px; padding: 18px 22px; margin-bottom: 14px; text-align: center;
     }
-    .paused-banner h2 {
-      font-size: 16px; font-weight: 800; color: #e05c5c; margin-bottom: 6px;
-    }
-    .paused-banner p {
-      font-size: 13px; color: #aaa; margin-bottom: 14px; line-height: 1.5;
-    }
+    .paused-banner h2 { font-size: 16px; font-weight: 800; color: #e05c5c; margin-bottom: 6px; }
+    .paused-banner p { font-size: 13px; color: #aaa; margin-bottom: 14px; line-height: 1.5; }
     .btn-get-app {
       display: inline-block; background: #db52a6; color: #fff;
       padding: 11px 24px; border-radius: 10px; font-size: 14px; font-weight: 700;
       text-decoration: none; transition: background 0.15s;
     }
     .btn-get-app:hover { background: #c9479a; }
-    /* Library panel */
-    ::-webkit-scrollbar { width: 5px; }
+
+    /* ── Token purchase cards (under URL box) ──────────────── */
+    .token-buy-wrap { max-width: 640px; margin: 22px auto 0; }
+    .token-buy-label {
+      text-align: center; font-size: 12px; font-weight: 700;
+      color: #555; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 12px;
+    }
+    .token-buy-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    }
+    .token-buy {
+      display: flex; flex-direction: column; align-items: flex-start;
+      background: #242222; border: 1.5px solid #2e2c2c; border-radius: 14px;
+      padding: 18px 22px; text-decoration: none; color: #f0eef0;
+      transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+      position: relative;
+    }
+    .token-buy:hover {
+      transform: translateY(-2px); border-color: #db52a6;
+      box-shadow: 0 10px 28px rgba(219,82,166,0.18);
+    }
+    .token-buy.alt:hover { border-color: #9b3adb; box-shadow: 0 10px 28px rgba(155,58,219,0.20); }
+    .token-buy .tag {
+      position: absolute; top: 10px; right: 10px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+      color: #1a1818; background: #bf9b3a; padding: 3px 9px; border-radius: 999px;
+    }
+    .token-buy .price {
+      font-size: 28px; font-weight: 800; letter-spacing: -0.5px;
+      color: #db52a6; line-height: 1; margin-bottom: 4px;
+    }
+    .token-buy.alt .price { color: #9b3adb; }
+    .token-buy .qty { font-size: 14px; font-weight: 700; color: #f0eef0; }
+    .token-buy .sub { font-size: 12px; color: #888; margin-top: 6px; line-height: 1.4; }
+    .token-buy .arrow {
+      align-self: flex-end; margin-top: 10px; font-size: 13px; font-weight: 700;
+      color: #db52a6; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .token-buy.alt .arrow { color: #9b3adb; }
+
+    /* ── PRODUCT SECTION ──────────────────────────────────── */
+    .product {
+      background: linear-gradient(180deg, #1a1818 0%, #1e1c1e 100%);
+      padding: 80px 20px 60px;
+      border-top: 1px solid #242222;
+      position: relative;
+    }
+    .container { max-width: 1080px; margin: 0 auto; }
+    .product-hero { text-align: center; max-width: 720px; margin: 0 auto 56px; }
+    .product-eyebrow {
+      display: inline-block; font-size: 12px; font-weight: 700;
+      color: #bf9b3a; letter-spacing: 0.12em; text-transform: uppercase;
+      background: rgba(191,155,58,0.10); border: 1px solid rgba(191,155,58,0.25);
+      padding: 5px 12px; border-radius: 999px; margin-bottom: 18px;
+    }
+    .product-hero h2 {
+      font-size: clamp(30px, 4.4vw, 44px); font-weight: 800; letter-spacing: -1px;
+      line-height: 1.1; margin-bottom: 14px;
+    }
+    .product-hero h2 .grad {
+      background: linear-gradient(95deg, #db52a6 0%, #bf9b3a 100%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .product-hero p {
+      font-size: 17px; color: #aaa6aa; line-height: 1.6; margin: 0 auto 24px; max-width: 580px;
+    }
+    .trust-row {
+      display: flex; gap: 18px; justify-content: center; flex-wrap: wrap;
+      font-size: 13px; color: #888; margin-top: 18px;
+    }
+    .trust-row .trust { display: inline-flex; align-items: center; gap: 6px; }
+    .trust-row .trust svg { color: #48c78e; }
+    .btn-buy {
+      display: inline-flex; align-items: center; gap: 10px;
+      background: linear-gradient(95deg, #db52a6 0%, #c44e9a 100%);
+      color: #fff; padding: 16px 32px; border-radius: 12px;
+      font-size: 16px; font-weight: 800; text-decoration: none;
+      box-shadow: 0 10px 28px rgba(219,82,166,0.28);
+      transition: transform 0.15s, box-shadow 0.15s;
+      border: none; cursor: pointer;
+    }
+    .btn-buy:hover { transform: translateY(-2px); box-shadow: 0 16px 36px rgba(219,82,166,0.40); }
+    .btn-buy:active { transform: translateY(0); }
+    .btn-buy.large { padding: 18px 38px; font-size: 17px; }
+
+    /* Feature grid */
+    .features {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+      margin-bottom: 64px;
+    }
+    .feature {
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 14px;
+      padding: 22px 22px; transition: border-color 0.15s, transform 0.15s;
+    }
+    .feature:hover { border-color: #353333; transform: translateY(-2px); }
+    .feature-icon {
+      width: 38px; height: 38px; border-radius: 10px;
+      background: rgba(219,82,166,0.12);
+      display: inline-flex; align-items: center; justify-content: center;
+      color: #db52a6; margin-bottom: 14px;
+    }
+    .feature h3 { font-size: 16px; font-weight: 800; color: #f0eef0; margin-bottom: 6px; letter-spacing: -0.2px; }
+    .feature p { font-size: 13.5px; color: #999; line-height: 1.55; }
+
+    /* Screenshot gallery */
+    .shots { margin-bottom: 64px; }
+    .shots-label {
+      display: block; text-align: center; font-size: 12px; font-weight: 700;
+      color: #bf9b3a; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 20px;
+    }
+    .shot-hero {
+      background: #1c1a1c; border: 1px solid #2e2c2c; border-radius: 16px;
+      overflow: hidden; margin-bottom: 14px;
+    }
+    .shot-hero img { display: block; width: 100%; height: auto; }
+    .shot-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .shot { margin: 0; }
+    .shot-frame {
+      background: #1c1a1c; border: 1px solid #2e2c2c; border-radius: 14px;
+      aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; padding: 10px;
+    }
+    .shot-frame img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+    .shot figcaption {
+      text-align: center; font-size: 13px; color: #999; font-weight: 600; margin-top: 10px;
+    }
+
+    /* iOS companion promo */
+    .ios-promo {
+      display: flex; align-items: center; gap: 22px;
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 16px;
+      padding: 22px 26px; margin: 0 auto 56px; max-width: 620px;
+    }
+    .ios-qr {
+      flex-shrink: 0; width: 116px; height: 116px; background: #fff;
+      border-radius: 12px; padding: 9px;
+    }
+    .ios-qr img { width: 100%; height: 100%; image-rendering: pixelated; }
+    .ios-copy { flex: 1; }
+    .ios-eyebrow {
+      display: inline-block; font-size: 11px; font-weight: 700; color: #bf9b3a;
+      letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 5px;
+    }
+    .ios-copy h3 { font-size: 19px; font-weight: 800; color: #f0eef0; margin-bottom: 6px; }
+    .ios-copy p { font-size: 13.5px; color: #999; line-height: 1.55; margin-bottom: 13px; }
+    .ios-btn {
+      display: inline-block; font-size: 13px; font-weight: 700; color: #f0eef0;
+      text-decoration: none; background: #1a1818; border: 1px solid #353333;
+      padding: 9px 16px; border-radius: 10px; transition: border-color 0.15s, color 0.15s;
+    }
+    .ios-btn:hover { border-color: #db52a6; color: #db52a6; }
+    @media (max-width: 600px) {
+      .shot-grid { grid-template-columns: 1fr; }
+      .ios-promo { flex-direction: column; text-align: center; }
+    }
+
+    /* Supported sites */
+    .sites { text-align: center; padding: 40px 0 60px; }
+    .sites-label {
+      font-size: 12px; font-weight: 700; color: #555;
+      letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 18px;
+    }
+    .sites-pills {
+      display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+      max-width: 820px; margin: 0 auto;
+    }
+    .site-pill {
+      background: #242222; border: 1px solid #2e2c2c;
+      padding: 8px 14px; border-radius: 999px;
+      font-size: 13px; font-weight: 600; color: #c8c4c8;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .site-pill:hover { border-color: #db52a6; color: #db52a6; }
+
+    /* How it works */
+    .how { padding: 40px 0; }
+    .how-title {
+      text-align: center; font-size: 28px; font-weight: 800; letter-spacing: -0.6px;
+      margin-bottom: 36px;
+    }
+    .how-steps {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+    }
+    .how-step {
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 14px;
+      padding: 26px 22px; position: relative;
+    }
+    .how-num {
+      position: absolute; top: 18px; right: 22px;
+      font-size: 44px; font-weight: 800; color: rgba(219,82,166,0.18);
+      letter-spacing: -2px; line-height: 1;
+    }
+    .how-step h3 { font-size: 17px; font-weight: 800; margin-bottom: 6px; color: #f0eef0; }
+    .how-step p { font-size: 13.5px; color: #999; line-height: 1.55; }
+
+    /* FAQ */
+    .faq { padding: 60px 0 40px; max-width: 760px; margin: 0 auto; }
+    .faq-title {
+      text-align: center; font-size: 28px; font-weight: 800; letter-spacing: -0.6px;
+      margin-bottom: 32px;
+    }
+    .faq details {
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 12px;
+      padding: 0; margin-bottom: 10px; overflow: hidden;
+    }
+    .faq summary {
+      cursor: pointer; padding: 18px 22px; font-size: 15px; font-weight: 700;
+      color: #f0eef0; list-style: none; display: flex; align-items: center; gap: 12px;
+      transition: background 0.15s;
+    }
+    .faq summary:hover { background: #2a2828; }
+    .faq summary::-webkit-details-marker { display: none; }
+    .faq summary::before {
+      content: '+'; color: #db52a6; font-size: 22px; font-weight: 400; line-height: 1;
+      width: 16px; text-align: center; transition: transform 0.2s;
+    }
+    .faq details[open] summary::before { content: '−'; }
+    .faq-body { padding: 0 22px 18px 50px; font-size: 14px; color: #aaa6aa; line-height: 1.65; }
+
+    /* Final CTA */
+    .final-cta {
+      text-align: center; padding: 60px 24px 40px;
+      background: radial-gradient(circle at 50% 50%, rgba(219,82,166,0.12), transparent 60%);
+      margin-top: 30px; border-radius: 18px;
+    }
+    .final-cta h3 {
+      font-size: clamp(24px, 3.4vw, 34px); font-weight: 800; letter-spacing: -0.6px;
+      margin-bottom: 10px;
+    }
+    .final-cta p { font-size: 15px; color: #aaa6aa; margin-bottom: 24px; }
+
+    /* Modal */
+    #dlModal {
+      display: none; position: fixed; inset: 0; z-index: 999;
+      background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
+      align-items: center; justify-content: center;
+    }
+    .modal-inner {
+      background: #1e1c1c; border: 1px solid #333; border-radius: 14px;
+      padding: 28px 32px; max-width: 420px; width: 90%; text-align: center;
+    }
+    /* Footer */
+    .site-footer {
+      text-align: center; padding: 36px 16px 28px;
+      font-size: 12px; color: #555; border-top: 1px solid #242222; margin-top: 40px;
+    }
+    .site-footer a { color: #888; text-decoration: none; }
+    .site-footer a:hover { color: #db52a6; }
+    .site-footer .sep { margin: 0 8px; color: #3a3838; }
+
+    ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #353333; border-radius: 3px; }
 
-    /* ── Tablet ────────────────────────────────────────────── */
-    @media (max-width: 900px) {
-      .main { padding: 14px; }
+    /* ── Responsive ────────────────────────────────────────── */
+    @media (max-width: 800px) {
+      .features, .how-steps { grid-template-columns: 1fr 1fr; }
     }
-
-    /* ── Mobile / iPhone ───────────────────────────────────── */
     @media (max-width: 600px) {
-      .header { padding: 0 14px; height: 52px; }
-      .logo   { font-size: 20px; }
-      .main   { padding: 10px; gap: 0; }
-      .card   { padding: 16px 14px; border-radius: 12px; margin-bottom: 10px; }
-
-      /* URL row — stack on narrow screens */
-      .url-row   { flex-wrap: wrap; gap: 8px; }
-      .btn-primary { width: 100%; padding: 14px; font-size: 16px; }
-
-      /* Type row — full-width select, full-width button */
-      .type-row { flex-wrap: wrap; gap: 8px; }
-      .type-row select { min-width: 0; }
-      .btn-secondary { width: 100%; text-align: center; }
-
-      /* Token row */
-      .token-row { flex-wrap: wrap; gap: 8px; }
-      .token-row .btn-ghost { width: 100%; }
-
-      /* Status log */
-      pre#log { font-size: 11px; max-height: 160px; }
+      .header { padding: 0 14px; height: 56px; gap: 8px; }
+      .nav a, .nav .nav-link { padding: 7px 10px; font-size: 12px; }
+      .nav .pill, .nav .buy-pill { padding: 7px 12px; }
+      .logo { font-size: 20px; }
+      .hero { padding: 36px 14px 32px; }
+      .downloader { padding: 16px; border-radius: 14px; }
+      .url-row { flex-wrap: wrap; }
+      .url-row .btn-primary { width: 100%; padding: 13px; font-size: 15px; justify-content: center; }
+      .token-buy-grid { grid-template-columns: 1fr; }
+      .product { padding: 56px 16px 40px; }
+      .features, .how-steps { grid-template-columns: 1fr; }
+      .how-num { font-size: 36px; }
     }
   </style>
 </head>
 <body>
+
   <header class="header">
-    <span class="logo">+downloads</span>
-    <span class="version-badge">v{{version}}</span>
-    <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20Bug%20Report" style="margin-left:auto; color:#555; font-size:12px; font-weight:600; text-decoration:none; padding:6px 12px; border:1px solid #353333; border-radius:8px; transition:color 0.15s, border-color 0.15s;" onmouseover="this.style.color='#f0eef0';this.style.borderColor='#555'" onmouseout="this.style.color='#555';this.style.borderColor='#353333'">Bug Report</a>
-    <a href="https://joshuaisaiah.art/payment/tip/573083b1f69f451c903db55d1a22ef2b" target="_blank" rel="noopener noreferrer" style="color:#1a1818; font-size:12px; font-weight:700; text-decoration:none; padding:6px 14px; background:#bf9b3a; border-radius:8px; transition:background 0.15s;" onmouseover="this.style.background='#d4ad42'" onmouseout="this.style.background='#bf9b3a'">Tip Jar</a>
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
+    <nav class="nav">
+      <button class="nav-link" onclick="document.getElementById('downloader').scrollIntoView({behavior:'smooth',block:'center'})">Online</button>
+      <a href="#features">Features</a>
+      <a href="#faq">FAQ</a>
+      <a class="pill" href="/desktop/buy">Buy Desktop · $7</a>
+    </nav>
   </header>
-  <main class="main">
-  <div class="left-col">
-    <div class="paused-banner" id="paused-banner">
-      <h2>Free Service Temporarily Paused</h2>
-      <p>The free web service is currently unavailable. For unlimited, uninterrupted downloads, get the full +downloads app.</p>
-      <a class="btn-get-app" href="https://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer">Get the Full Version</a>
-    </div>
-    <div class="paused-banner" id="buy-access-banner" style="border-color:#db52a6; margin-top:0;">
-      <h2 style="color:#db52a6;">Get Instant Access</h2>
-      <p>Purchase a token to use the downloader right now — no account needed, delivered to your email instantly.</p>
-      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-        <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">Buy Access — $1 for 3 downloads</a>
-        <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer" style="background:#9b3adb;">$5 for 10 downloads</a>
-      </div>
-    </div>
-    <div class="card">
-      <div class="url-row">
-        <input id="url" type="text" placeholder="Paste YouTube, Spotify, or Apple Music URL here" />
-        <button class="btn-primary" onclick="start()">Download</button>
-      </div>
-      <div class="type-row">
-        <select id="type">
-          <option value="video">Video (MP4)</option>
-          <option value="audio">Audio (MP3)</option>
-          <option value="soundcloud">SoundCloud</option>
-          <option value="spotify">Spotify</option>
-          <option value="apple_music">Apple Music</option>
-        </select>
-      </div>
-      <div id="scOptions">
-        <label>Format:
-          <select id="scQuality">
-            <option value="m4a">m4a (Best, default)</option>
-            <option value="mp3">mp3 (Compatible)</option>
-          </select>
-        </label>
-        <label><input type="checkbox" id="scPlaylist" checked> Download playlists/sets</label>
-      </div>
-      <div id="spNote" class="note-pill">Spotify tracks are matched to YouTube and downloaded as MP3.</div>
-      <div id="amNote" class="note-pill">Apple Music songs and albums are matched to YouTube and downloaded as MP3. Playlists are not supported.</div>
-    </div>
 
-    <div class="card">
-      <div class="status-row">
-        <span id="statusPill">idle</span>
-        <span id="queuePos"></span>
-        <button onclick="cancel()" id="cancelBtn" class="btn-cancel" style="display:none;">Cancel</button>
-      </div>
-      <div id="progressWrap">
-        <div id="progressTrack"><div id="progressBar"></div><div id="progressLabel"></div></div>
-        <small id="progressText"></small>
-      </div>
-      <div id="phase" class="phase-label">Idle…</div>
-      <div id="phaseNote" class="phase-note"></div>
-      <pre id="log"></pre>
-      <div id="meta"></div>
-    </div>
-
-    <div class="card" id="token-card" style="padding:16px 18px;">
-      <div id="token-unlocked" style="display:none;align-items:center;gap:10px;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/><path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span style="font-size:13px;color:#48c78e;font-weight:600;">Access token active</span>
-        <span id="token-remaining" style="font-size:12px;color:#666;margin-left:2px;"></span>
-        <button onclick="clearToken()" style="margin-left:auto;background:transparent;border:none;color:#555;font-size:11px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:color 0.15s;" onmouseover="this.style.color='#e05c5c'" onmouseout="this.style.color='#555'">Remove</button>
-      </div>
-      <div id="token-input-row" style="display:flex;gap:8px;align-items:center;">
-        <input id="token-field" type="text" placeholder="Have an access token? Enter it here" autocomplete="off" spellcheck="false"
-          style="flex:1;background:#1a1818;border:1px solid #2e2c2c;border-radius:8px;padding:10px 12px;font-size:13px;font-family:monospace;color:#f0eef0;outline:none;transition:border-color 0.15s;"
-          onfocus="this.style.borderColor='#db52a6'" onblur="this.style.borderColor='#2e2c2c'"
-          onkeydown="if(event.key==='Enter')unlockWithToken()" />
-        <button onclick="unlockWithToken()" id="token-submit-btn"
-          style="background:#db52a6;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background 0.15s;"
-          onmouseover="this.style.background='#c4478f'" onmouseout="this.style.background='#db52a6'">Unlock</button>
-      </div>
-      <div id="token-error" style="display:none;font-size:12px;color:#e05c5c;margin-top:6px;"></div>
-    </div>
-
-    <a href="https://urapages.com/downloads/app" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;gap:12px;background:#242222;border:1px solid #2e2c2c;border-radius:14px;padding:16px 20px;text-decoration:none;transition:border-color 0.2s;" onmouseover="this.style.borderColor='#db52a6'" onmouseout="this.style.borderColor='#2e2c2c'">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
-        <path d="M3 7C3 5.89543 3.89543 5 5 5H9.58579C9.851 5 10.1054 5.10536 10.2929 5.29289L11.7071 6.70711C11.8946 6.89464 12.149 7 12.4142 7H19C20.1046 7 21 7.89543 21 9V17C21 18.1046 20.1046 19 19 19H5C3.89543 19 3 18.1046 3 17V7Z" fill="#db52a6" opacity="0.2"/>
-        <path d="M3 7C3 5.89543 3.89543 5 5 5H9.58579C9.851 5 10.1054 5.10536 10.2929 5.29289L11.7071 6.70711C11.8946 6.89464 12.149 7 12.4142 7H19C20.1046 7 21 7.89543 21 9V17C21 18.1046 20.1046 19 19 19H5C3.89543 19 3 18.1046 3 17V7Z" stroke="#db52a6" stroke-width="1.5" stroke-linejoin="round"/>
-        <path d="M12 11V15M12 15L10 13M12 15L14 13" stroke="#db52a6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      <div>
-        <div style="font-size:13px;font-weight:700;color:#f0eef0;">Get +downloads</div>
-        <div style="font-size:12px;color:#666;margin-top:2px;">Unlimited downloads — no queue, no limits</div>
-      </div>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="margin-left:auto;flex-shrink:0"><path d="M9 18l6-6-6-6" stroke="#444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </a>
-
-    <!-- download-complete modal -->
-    <div id="dlModal" style="display:none; position:fixed; inset:0; z-index:999; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
-      <div style="background:#1e1c1c; border:1px solid #333; border-radius:14px; padding:28px 32px; max-width:420px; width:90%; text-align:center;">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" style="margin-bottom:12px;">
-          <circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/>
-          <path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <div id="dlModalTitle" style="font-size:15px; font-weight:600; color:#f0eef0; margin-bottom:6px;"></div>
-        <div id="dlModalSub" style="font-size:12px; color:#777; margin-bottom:20px;"></div>
-        <div style="display:flex; gap:10px; justify-content:center;">
-          <a id="dlModalBtn" href="#" style="display:inline-flex; align-items:center; gap:6px; padding:10px 28px; background:#db52a6; color:#fff; font-size:14px; font-weight:600; border-radius:8px; text-decoration:none; transition:background 0.15s;"
-             onmouseover="this.style.background='#c4478f'" onmouseout="this.style.background='#db52a6'">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Download
+  <!-- ─── PRODUCT SECTION (Desktop) ────────────────────── -->
+  <section class="product" id="features">
+    <div class="container">
+      <div class="product-hero">
+        <span class="product-eyebrow">+downloads for Desktop</span>
+        <h2>Skip the queue. <span class="grad">Own the tool.</span></h2>
+        <p>Unlimited downloads, batch jobs, 4K video and lossless audio — all running locally on your Mac or PC. No tokens, no waits, no limits.</p>
+        <div>
+          <a class="btn-buy large" href="/desktop/buy">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Buy +downloads — $7
           </a>
-          <button onclick="closeDlModal()" style="padding:10px 20px; background:transparent; border:1px solid #333; color:#999; font-size:13px; border-radius:8px; cursor:pointer; transition:border-color 0.15s;"
-                  onmouseover="this.style.borderColor='#555'" onmouseout="this.style.borderColor='#333'">Close</button>
+        </div>
+        <div class="trust-row">
+          <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Free updates forever</span>
+          <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>macOS, Windows &amp; Linux</span>
+          <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Auto-download after checkout</span>
+        </div>
+      </div>
+
+      <!-- Screenshots -->
+      <div class="shots">
+        <span class="shots-label">See it in action</span>
+        <div class="shot-hero">
+          <img src="/static/shot-app.png" alt="The +downloads desktop app — downloader, music player and video library in one window" width="2000" height="1193" loading="lazy">
+        </div>
+        <div class="shot-grid">
+          <figure class="shot">
+            <div class="shot-frame"><img src="/static/shot-sources.png" alt="Source picker — YouTube, SoundCloud, Spotify, Apple Music" width="680" height="438" loading="lazy"></div>
+            <figcaption>Download from any source</figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-frame"><img src="/static/shot-video.jpg" alt="Built-in video player and searchable library" width="1100" height="992" loading="lazy"></div>
+            <figcaption>Watch &amp; organize your library</figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-frame"><img src="/static/shot-music.png" alt="Music player with Burn-a-CD queue" width="688" height="1128" loading="lazy"></div>
+            <figcaption>Music player &amp; CD burning</figcaption>
+          </figure>
+        </div>
+      </div>
+
+      <div class="features">
+        <div class="feature">
+          <div class="feature-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h3>Unlimited downloads</h3>
+          <p>No queue, no per-day cap, no token counter. Run as many jobs as your bandwidth can handle.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M3 7h18M3 12h18M3 17h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+          <h3>Batch queue</h3>
+          <p>Paste a list, hit go. Channel rips, playlists, and albums process in parallel in the background.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg></div>
+          <h3>4K + lossless audio</h3>
+          <p>Highest available video resolution and best-source audio. m4a, flac, mp3 — pick what you want.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 22s8-4 8-12V5l-8-3-8 3v5c0 8 8 12 8 12z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></div>
+          <h3>Runs locally</h3>
+          <p>Files never touch our server. Nothing logged, nothing uploaded, nothing tracked.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+          <h3>Resume + retry</h3>
+          <p>Interrupted downloads pick up where they left off. Flaky network? No re-pay, no re-queue.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h3>Updates free forever</h3>
+          <p>One purchase, every future version. New site support, new formats, new features — all included.</p>
+        </div>
+      </div>
+
+      <!-- Supported sites -->
+      <div class="sites">
+        <div class="sites-label">Works with</div>
+        <div class="sites-pills">
+          <span class="site-pill">YouTube</span>
+          <span class="site-pill">Spotify</span>
+          <span class="site-pill">Apple Music</span>
+          <span class="site-pill">SoundCloud</span>
+          <span class="site-pill">Vimeo</span>
+          <span class="site-pill">Twitter / X</span>
+          <span class="site-pill">Facebook</span>
+          <span class="site-pill">TikTok</span>
+          <span class="site-pill">Twitch</span>
+          <span class="site-pill">Bandcamp</span>
+          <span class="site-pill">Mixcloud</span>
+          <span class="site-pill">Dailymotion</span>
+          <span class="site-pill">+1000 more</span>
+        </div>
+      </div>
+
+      <!-- How it works -->
+      <div class="how">
+        <h2 class="how-title">How it works</h2>
+        <div class="how-steps">
+          <div class="how-step">
+            <span class="how-num">1</span>
+            <h3>Buy &amp; download</h3>
+            <p>Hit Buy, complete checkout, and the installer downloads automatically — no email links, no waiting.</p>
+          </div>
+          <div class="how-step">
+            <span class="how-num">2</span>
+            <h3>Paste a URL</h3>
+            <p>Drop any video or track link into the app. It auto-detects the site and picks the best format.</p>
+          </div>
+          <div class="how-step">
+            <span class="how-num">3</span>
+            <h3>Save the file</h3>
+            <p>Files land in your Downloads folder. Keep them, send them, archive them. They're yours.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- FAQ -->
+      <div class="faq" id="faq">
+        <h2 class="faq-title">Common questions</h2>
+        <details>
+          <summary>What's the difference between the online tool and the desktop app?</summary>
+          <div class="faq-body">The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $7 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server.</div>
+        </details>
+        <details>
+          <summary>Are updates really free forever?</summary>
+          <div class="faq-body">Yes. You buy once and every future version is included — new site support, new formats, new UI. No subscriptions, no upgrade fees.</div>
+        </details>
+        <details>
+          <summary>What happens after I buy the desktop app?</summary>
+          <div class="faq-body">The moment payment confirms, the installer for your operating system (macOS, Windows or Linux) starts downloading directly from digitaldownloads.space. No email link, no waiting room.</div>
+        </details>
+        <details>
+          <summary>Which sites are supported?</summary>
+          <div class="faq-body">YouTube, Spotify, Apple Music, SoundCloud, Vimeo, Twitter/X, Facebook, TikTok, Twitch, Bandcamp, Mixcloud, Dailymotion, plus ~1000 others. If a site streams audio or video, there's a good chance we support it.</div>
+        </details>
+        <details>
+          <summary>Is it legal?</summary>
+          <div class="faq-body">+downloads is a tool — what you do with it is on you. We expect downloads only for content you own, content licensed under permissive terms, or content where the source platform permits download. See our <a href="/terms" style="color:#bf9b3a;">Terms</a>.</div>
+        </details>
+        <details>
+          <summary>Do you collect my data?</summary>
+          <div class="faq-body">No third-party analytics, no tracking SDKs. The desktop app runs entirely on your machine — we never see your URLs, files, or activity. See our <a href="/privacy" style="color:#bf9b3a;">Privacy policy</a>.</div>
+        </details>
+      </div>
+
+      <!-- iOS companion -->
+      <div class="ios-promo">
+        <div class="ios-qr">
+          <img src="/static/ios-app-qr.png" alt="Scan to get + Media Player on the App Store" width="330" height="330">
+        </div>
+        <div class="ios-copy">
+          <span class="ios-eyebrow">New iOS companion</span>
+          <h3>+ Media Player</h3>
+          <p>Scan with your iPhone to play your synced +downloads library on the go — pairs with the desktop app over Wi-Fi.</p>
+          <a class="ios-btn" href="https://urapages.com/r/ios-qr?s=digitaldownloads-home" target="_blank" rel="noopener noreferrer">Open in App Store &rsaquo;</a>
+        </div>
+      </div>
+
+      <!-- Final CTA -->
+      <div class="final-cta">
+        <h3>Seven bucks. Every future update. Done.</h3>
+        <p>Stop fighting with free-trial walls and per-download tokens.</p>
+        <a class="btn-buy large" href="/desktop/buy">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Get +downloads — $7
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── HERO ─────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="hero-inner">
+      <span class="hero-eyebrow">Online · Free for token-holders</span>
+      <h1 class="hero-title">Save anything you can <span class="grad">stream</span>.</h1>
+      <p class="hero-sub">YouTube, Spotify, Apple Music, SoundCloud and more. Paste a link, get the file — right here, or grab the desktop app for unlimited downloads.</p>
+
+      <!-- Downloader card -->
+      <div id="downloader" class="downloader">
+        <div class="paused-banner" id="paused-banner">
+          <h2>Free Service Temporarily Paused</h2>
+          <p>The free web service is currently unavailable. Grab a token below or get the desktop app for unlimited downloads.</p>
+          <a class="btn-get-app" href="/desktop/buy">Get the Desktop App</a>
+        </div>
+        <div class="paused-banner" id="buy-access-banner" style="border-color:#db52a6;">
+          <h2 style="color:#db52a6;">Get Instant Access</h2>
+          <p>Purchase a token to use the downloader right now — no account needed, delivered to your email instantly.</p>
+          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+            <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">$1 / 3 downloads</a>
+            <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer" style="background:#9b3adb;">$5 / 10 downloads</a>
+          </div>
+        </div>
+
+        <div class="url-row">
+          <input id="url" type="text" placeholder="Paste a YouTube, Spotify, Apple Music or SoundCloud URL" autocomplete="off" spellcheck="false" />
+          <button id="btnInsertToken" class="btn-primary btn-token" onclick="onInsertToken()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 11V8a5 5 0 0110 0v3M5 11h14v9H5v-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Insert Token
+          </button>
+          <button id="btnDownload" class="btn-primary" onclick="start()" style="display:none;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download
+          </button>
+        </div>
+        <div class="type-row">
+          <select id="type">
+            <option value="video">Video (MP4)</option>
+            <option value="audio">Audio (MP3)</option>
+            <option value="soundcloud">SoundCloud</option>
+            <option value="spotify">Spotify</option>
+            <option value="apple_music">Apple Music</option>
+          </select>
+        </div>
+        <div id="scOptions">
+          <label>Format:
+            <select id="scQuality">
+              <option value="m4a">m4a (Best, default)</option>
+              <option value="mp3">mp3 (Compatible)</option>
+            </select>
+          </label>
+          <label><input type="checkbox" id="scPlaylist" checked> Download playlists/sets</label>
+        </div>
+        <div id="spNote" class="note-pill">Spotify tracks are matched to YouTube and downloaded as MP3.</div>
+        <div id="amNote" class="note-pill">Apple Music songs and albums are matched to YouTube and downloaded as MP3. Playlists are not supported.</div>
+
+        <div class="token-area">
+          <div id="token-input-row">
+            <input id="token-field" type="text" placeholder="Paste your access token" autocomplete="off" spellcheck="false"
+              onkeydown="if(event.key==='Enter')unlockWithToken()" />
+            <button id="token-submit-btn" onclick="unlockWithToken()">Unlock</button>
+          </div>
+          <div id="token-error"></div>
+          <div id="token-unlocked">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/><path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="lab">Access token active</span>
+            <span id="token-remaining"></span>
+            <button onclick="clearToken()">Remove</button>
+          </div>
+        </div>
+
+        <!-- status / progress -->
+        <div id="statusBlock" class="status-block">
+          <div class="status-row">
+            <span id="statusPill">idle</span>
+            <span id="queuePos"></span>
+            <button onclick="cancel()" id="cancelBtn" class="btn-cancel" style="display:none;">Cancel</button>
+          </div>
+          <div id="progressWrap">
+            <div id="progressTrack"><div id="progressBar"></div><div id="progressLabel"></div></div>
+            <small id="progressText"></small>
+          </div>
+          <div id="phase" class="phase-label">Idle…</div>
+          <div id="phaseNote" class="phase-note"></div>
+          <pre id="log"></pre>
+          <div id="meta"></div>
+        </div>
+      </div>
+
+      <!-- Token purchase options under the URL box -->
+      <div class="token-buy-wrap">
+        <div class="token-buy-label">Buy a token to use it online</div>
+        <div class="token-buy-grid">
+          <a class="token-buy" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">
+            <div class="price">$1</div>
+            <div class="qty">3 downloads</div>
+            <div class="sub">Delivered instantly via email. Try it once, no account needed.</div>
+            <div class="arrow">Buy 3-pack →</div>
+          </a>
+          <a class="token-buy alt" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">
+            <span class="tag">Best value</span>
+            <div class="price">$5</div>
+            <div class="qty">10 downloads</div>
+            <div class="sub">Save 33% vs the 3-pack. Same instant delivery.</div>
+            <div class="arrow">Buy 10-pack →</div>
+          </a>
         </div>
       </div>
     </div>
-  </div><!-- /left-col -->
+  </section>
 
-  </main>
+  <!-- download-complete modal -->
+  <div id="dlModal">
+    <div class="modal-inner">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" style="margin-bottom:12px;">
+        <circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/>
+        <path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div id="dlModalTitle" style="font-size:15px; font-weight:600; color:#f0eef0; margin-bottom:6px;"></div>
+      <div id="dlModalSub" style="font-size:12px; color:#777; margin-bottom:20px;"></div>
+      <div style="display:flex; gap:10px; justify-content:center;">
+        <a id="dlModalBtn" href="#" style="display:inline-flex; align-items:center; gap:6px; padding:10px 28px; background:#db52a6; color:#fff; font-size:14px; font-weight:600; border-radius:8px; text-decoration:none;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Download
+        </a>
+        <button onclick="closeDlModal()" style="padding:10px 20px; background:transparent; border:1px solid #333; color:#999; font-size:13px; border-radius:8px; cursor:pointer;">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <a href="/terms">Terms of Service</a>
+    <span class="sep">·</span>
+    <a href="/privacy">Privacy Policy</a>
+    <span class="sep">·</span>
+    <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20Bug%20Report">Bug Report</a>
+    <span class="sep">·</span>
+    <a href="https://joshuaisaiah.art/payment/tip/573083b1f69f451c903db55d1a22ef2b" target="_blank" rel="noopener noreferrer">Tip Jar</a>
+  </footer>
 
 <script>
 let currentJob = null;
-
 let _tokenUnlocked = false;
+
+function showStatusBlock() {
+  document.getElementById('statusBlock').classList.add('active');
+}
+function hideStatusBlock() {
+  document.getElementById('statusBlock').classList.remove('active');
+}
+
+function onInsertToken() {
+  const row = document.getElementById('token-input-row');
+  row.classList.add('open');
+  const f = document.getElementById('token-field');
+  f.focus();
+  // small pulse to draw attention
+  f.style.boxShadow = '0 0 0 3px rgba(219,82,166,0.18)';
+  setTimeout(() => { f.style.boxShadow = ''; }, 600);
+}
+
+function setPrimaryToDownload() {
+  document.getElementById('btnInsertToken').style.display = 'none';
+  document.getElementById('btnDownload').style.display = 'inline-flex';
+}
+function setPrimaryToInsertToken() {
+  document.getElementById('btnInsertToken').style.display = 'inline-flex';
+  document.getElementById('btnDownload').style.display = 'none';
+}
 
 async function validateStoredToken() {
   const token = localStorage.getItem('access_token');
@@ -1054,20 +1977,21 @@ async function validateStoredToken() {
 }
 
 function showTokenUnlocked(remaining) {
-  document.getElementById('token-input-row').style.display = 'none';
+  document.getElementById('token-input-row').classList.remove('open');
   document.getElementById('token-error').style.display = 'none';
   const row = document.getElementById('token-unlocked');
   row.style.display = 'flex';
   if (remaining !== undefined) {
     document.getElementById('token-remaining').textContent = `(${remaining} download${remaining !== 1 ? 's' : ''} remaining)`;
   }
+  setPrimaryToDownload();
 }
 
 function clearToken() {
   localStorage.removeItem('access_token');
   _tokenUnlocked = false;
   document.getElementById('token-unlocked').style.display = 'none';
-  document.getElementById('token-input-row').style.display = 'flex';
+  setPrimaryToInsertToken();
   checkPaused();
 }
 
@@ -1090,11 +2014,9 @@ async function unlockWithToken() {
       localStorage.setItem('access_token', token);
       _tokenUnlocked = true;
       showTokenUnlocked(d.remaining);
-      // If page was paused, unlock the UI
       document.getElementById('paused-banner').style.display = 'none';
       document.getElementById('buy-access-banner').style.display = 'none';
       document.getElementById('url').disabled = false;
-      document.querySelector('.btn-primary').disabled = false;
     } else {
       errEl.textContent = d.reason === 'exhausted'
         ? 'This token has no downloads remaining.'
@@ -1120,12 +2042,14 @@ async function checkPaused() {
       banner.style.display = 'block';
       buyBanner.style.display = 'block';
       document.getElementById('url').disabled = true;
-      document.querySelector('.btn-primary').disabled = true;
+      document.getElementById('btnDownload').disabled = true;
+      document.getElementById('btnInsertToken').disabled = false;
     } else {
       banner.style.display = 'none';
       buyBanner.style.display = 'none';
       document.getElementById('url').disabled = false;
-      document.querySelector('.btn-primary').disabled = false;
+      document.getElementById('btnDownload').disabled = false;
+      document.getElementById('btnInsertToken').disabled = false;
     }
   } catch (e) {}
 }
@@ -1137,12 +2061,6 @@ function escHtml(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
-document.querySelectorAll('details').forEach(function(el) {
-  el.addEventListener('toggle', function() {
-    const chevronId = this.querySelector('summary span[id]');
-    if (chevronId) chevronId.style.transform = this.open ? 'rotate(90deg)' : '';
-  });
-});
 
 function syncScOptions() {
   const t = document.getElementById('type').value;
@@ -1171,13 +2089,14 @@ function renderPhase(phase, note, tail) {
 
 function lastMeaningfulLines(log, n) {
   if (!log) return '';
-  const lines = log.split('\\n').map(s => s.trimEnd()).filter(s => s.length > 0);
-  return lines.slice(-n).join('\\n');
+  const lines = log.split('\n').map(s => s.trimEnd()).filter(s => s.length > 0);
+  return lines.slice(-n).join('\n');
 }
 
 async function start() {
   const url = document.getElementById('url').value.trim();
   if (!url) return;
+  showStatusBlock();
   if (url.includes('open.spotify.com') || url.includes('spotify.com/')) {
     document.getElementById('type').value = 'spotify';
     syncScOptions();
@@ -1189,8 +2108,8 @@ async function start() {
   const type = document.getElementById('type').value;
   const scQuality = document.getElementById('scQuality').value;
   const scPlaylist = document.getElementById('scPlaylist').checked;
-  renderPhase('Starting\u2026', '', '');
-  document.getElementById('meta').textContent = "";
+  renderPhase('Starting…', '', '');
+  document.getElementById('meta').textContent = '';
   setStatus('queued');
   let res;
   try {
@@ -1216,7 +2135,7 @@ async function start() {
       setStatus('error');
       return;
     }
-    renderPhase('Couldn\u2019t start download', '', err.error || ('Server returned HTTP ' + res.status));
+    renderPhase('Couldn’t start download', '', err.error || ('Server returned HTTP ' + res.status));
     setStatus('error');
     return;
   }
@@ -1249,17 +2168,16 @@ async function poll() {
     _pollFailCount++;
     if (jobAtRequest !== currentJob) return;
     if (_pollFailCount >= 5) {
-      renderPhase('Lost connection', '', 'We couldn\u2019t reach the server after several tries. Refresh the page to check the job.');
+      renderPhase('Lost connection', '', 'We couldn’t reach the server after several tries. Refresh the page to check the job.');
       setStatus('error');
       return;
     }
-    renderPhase('Reconnecting\u2026', 'Attempt ' + _pollFailCount + '/5', '');
+    renderPhase('Reconnecting…', 'Attempt ' + _pollFailCount + '/5', '');
     const backoff = Math.min(5000, 500 * Math.pow(2, _pollFailCount));
     setTimeout(poll, backoff);
     return;
   }
-  // Phase + note + raw log tail
-  const phase = data.phase || (data.status === 'queued' ? 'Queued' : (data.status === 'running' ? 'Working\u2026' : (data.status || '')));
+  const phase = data.phase || (data.status === 'queued' ? 'Queued' : (data.status === 'running' ? 'Working…' : (data.status || '')));
   const note = data.phase_note || '';
   const errMsg = (data.status === 'error') ? (data.error_message || '') : '';
   const rawTail = lastMeaningfulLines(data.log || '', 3);
@@ -1272,14 +2190,14 @@ async function poll() {
     const n = (data.output_paths || []).length;
     let meta = done + '/' + tot + ' tracks';
     if (data.status === 'done' && n > 0) {
-      meta += ' \u2014 <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>';
+      meta += ' — <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>';
     }
     meta += ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View log</a>';
     document.getElementById('meta').innerHTML = meta;
   } else if (data.output_paths && data.output_paths.length > 1) {
     const n = data.output_paths.length;
     document.getElementById('meta').innerHTML =
-      n + ' files \u2014 <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>'
+      n + ' files — <a href="/download/' + currentJob + '" target="_blank">Download ZIP</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   } else if (data.file || data.output_path) {
     const name = data.file || data.output_path.split('/').pop();
@@ -1287,13 +2205,13 @@ async function poll() {
       'File: <a href="/download/' + currentJob + '" target="_blank">' + escHtml(name) + '</a>'
       + ' | <a href="/job-log/' + currentJob + '?tail=200" target="_blank">View full log</a>';
   }
-  if (data.status === "done") {
+  if (data.status === 'done') {
     document.getElementById('cancelBtn').style.display = 'none';
     showDlModal(data);
     setTimeout(resetUI, 1500);
     return;
   }
-  if (data.status === "error" || data.status === "cancelled") {
+  if (data.status === 'error' || data.status === 'cancelled') {
     document.getElementById('cancelBtn').style.display = 'none';
     return;
   }
@@ -1301,7 +2219,7 @@ async function poll() {
 }
 
 function extractPercent(log) {
-  const lines = log.split('\\n');
+  const lines = log.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = lines[i].match(/\[download\]\s+([\d.]+)%/);
     if (m) return parseFloat(m[1]);
@@ -1322,9 +2240,9 @@ function updateProgress(status, log, data) {
     label.textContent = '';
     const pos = data.queue_position != null ? data.queue_position + 1 : null;
     const qLen = data.queue_length || 0;
-    let qText = 'Waiting in queue\u2026';
+    let qText = 'Waiting in queue…';
     if (pos != null) qText = 'Queue position: ' + pos + ' of ' + qLen;
-    if (data.active_count > 0) qText += ' \u00B7 ' + data.active_count + ' downloading now';
+    if (data.active_count > 0) qText += ' · ' + data.active_count + ' downloading now';
     text.textContent = qText;
   } else if (status === 'running') {
     wrap.style.display = 'block';
@@ -1347,7 +2265,7 @@ function updateProgress(status, log, data) {
         bar.className = 'indeterminate';
         bar.style.width = '';
         label.textContent = '';
-        text.textContent = 'Processing\u2026';
+        text.textContent = 'Processing…';
       }
     }
   } else if (status === 'done') {
@@ -1377,9 +2295,9 @@ function showDlModal(data) {
   const multi = data.output_paths && data.output_paths.length > 1;
   if (multi) {
     const paths = data.output_paths;
-    const stem = (paths[0].split('/').pop() || '').replace(/\\.[^.]+$/, '').trim();
+    const stem = (paths[0].split('/').pop() || '').replace(/\.[^.]+$/, '').trim();
     title.textContent = stem + (paths.length > 1 ? ' + ' + (paths.length - 1) + ' more' : '');
-    sub.textContent = paths.length + ' files \u2014 zipped together';
+    sub.textContent = paths.length + ' files — zipped together';
     btn.textContent = ' Download ZIP';
     btn.href = '/download/' + currentJob;
   } else {
@@ -1403,7 +2321,7 @@ function resetUI() {
   currentJob = null;
   _pollFailCount = 0;
   document.getElementById('url').value = '';
-  renderPhase('Idle\u2026', '', '');
+  renderPhase('Idle…', '', '');
   document.getElementById('meta').innerHTML = '';
   document.getElementById('progressWrap').style.display = 'none';
   const rBar = document.getElementById('progressBar');
@@ -1414,6 +2332,7 @@ function resetUI() {
   document.getElementById('progressLabel').textContent = '';
   document.getElementById('progressText').textContent = '';
   setStatus('idle');
+  hideStatusBlock();
 }
 
 function setStatus(status) {
@@ -1442,16 +2361,7 @@ async function cancel() {
   });
   poll();
 }
-
-
 </script>
-
-<footer style="text-align:center; padding:24px 16px 20px; font-size:12px; color:#555;">
-  <a href="/terms" style="color:#555; text-decoration:underline; text-underline-offset:3px;">Terms of Service</a>
-  <span style="margin:0 8px; color:#3a3838;">·</span>
-  <a href="/privacy" style="color:#555; text-decoration:underline; text-underline-offset:3px;">Privacy Policy</a>
-</footer>
-
 </body>
 </html>
 """
@@ -1463,7 +2373,8 @@ _LEGAL_PAGE_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#1a1818">
   <title>{{ page_title }} · +downloads</title>
-  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1475,8 +2386,10 @@ _LEGAL_PAGE_TEMPLATE = """<!doctype html>
       background: #242222; border-bottom: 1px solid #2e2c2c;
       padding: 0 32px; height: 62px; display: flex; align-items: center; gap: 12px;
     }
-    .logo { font-size: 24px; font-weight: 800; color: #db52a6; letter-spacing: -0.5px; text-decoration: none; }
+    .logo { font-size: 24px; font-weight: 800; color: #db52a6; letter-spacing: -0.5px; text-decoration: none; white-space: nowrap; }
+    .logo .lo-prefix { color: #f0eef0; font-weight: 700; margin-right: 4px; }
     .header a.logo:hover { color: #c9479a; }
+    .header a.logo:hover .lo-prefix { color: #f0eef0; }
     .legal-wrap { max-width: 720px; margin: 0 auto; padding: 36px 24px 80px; }
     h1 { font-size: 28px; font-weight: 800; color: #f0eef0; margin-bottom: 6px; letter-spacing: -0.4px; }
     .updated { font-size: 12px; color: #666; margin-bottom: 28px;
@@ -1507,7 +2420,7 @@ _LEGAL_PAGE_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <div class="header">
-    <a class="logo" href="/">+downloads</a>
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
   </div>
   <main class="legal-wrap">
     <h1>{{ page_title }}</h1>
@@ -1669,6 +2582,153 @@ _TERMS_BODY = """
 _LEGAL_LAST_UPDATED = "May 18, 2026"
 
 
+_DESKTOP_REDEEM_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1a1818">
+  <title>Your purchase &middot; +downloads</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1818; color: #f0eef0; min-height: 100vh;
+    }
+    .header {
+      background: #242222; border-bottom: 1px solid #2e2c2c;
+      padding: 0 32px; height: 62px; display: flex; align-items: center; gap: 12px;
+    }
+    .logo { font-size: 24px; font-weight: 800; color: #db52a6; text-decoration: none; letter-spacing: -0.5px; white-space: nowrap; }
+    .logo .lo-prefix { color: #f0eef0; font-weight: 700; margin-right: 4px; }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 64px 24px 80px; text-align: center; }
+    .icon-badge {
+      width: 64px; height: 64px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center; margin: 0 auto 22px;
+    }
+    .icon-ok { background: rgba(72,199,142,0.12); border: 1px solid rgba(72,199,142,0.30); }
+    .icon-err { background: rgba(255,107,107,0.10); border: 1px solid rgba(255,107,107,0.28); }
+    h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.6px; margin-bottom: 12px; }
+    .sub { font-size: 15px; color: #aaa6aa; line-height: 1.65; margin-bottom: 18px; }
+    .sub strong { color: #f0eef0; font-weight: 600; }
+    .card {
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 14px;
+      padding: 18px 22px; margin: 22px auto 0; max-width: 420px; text-align: left;
+    }
+    .feat { display: flex; align-items: center; gap: 10px; font-size: 14px; color: #c8c4c8; margin: 8px 0; }
+    .feat svg { color: #48c78e; flex-shrink: 0; }
+    .dl-btns { display: flex; flex-direction: column; gap: 10px; max-width: 340px; margin: 6px auto 0; }
+    .dl-btn {
+      display: flex; align-items: center; justify-content: center; gap: 9px;
+      padding: 14px 20px; border-radius: 12px; font-size: 15px; font-weight: 700;
+      text-decoration: none; background: #242222; border: 1px solid #353333; color: #f0eef0;
+      transition: border-color 0.15s, transform 0.1s;
+    }
+    .dl-btn:hover { border-color: #db52a6; }
+    .dl-btn:active { transform: scale(0.98); }
+    .dl-btn.primary {
+      background: linear-gradient(95deg, #db52a6 0%, #c44e9a 100%);
+      border-color: transparent; color: #fff; box-shadow: 0 8px 22px rgba(219,82,166,0.26);
+    }
+    .dl-btn svg { flex-shrink: 0; }
+    .spinner {
+      width: 42px; height: 42px; margin: 0 auto 22px;
+      border: 3px solid #2e2c2c; border-top-color: #db52a6; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .helper { font-size: 13px; color: #777; margin-top: 22px; line-height: 1.6; }
+    .helper a { color: #bf9b3a; }
+    .back {
+      display: inline-block; margin-top: 30px; padding: 10px 18px;
+      background: #242222; border: 1px solid #353333; border-radius: 10px;
+      color: #aaa; text-decoration: none; font-size: 13px;
+    }
+    .back:hover { color: #db52a6; border-color: #db52a6; }
+    footer { text-align: center; padding: 22px 16px; font-size: 12px; color: #555; }
+    footer a { color: #888; text-decoration: none; }
+    footer .sep { margin: 0 8px; color: #3a3838; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
+  </header>
+  <main class="wrap">
+    {% if state == 'confirmed' %}
+    <div class="icon-badge icon-ok">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="#48c78e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <h1>Purchase confirmed</h1>
+    {% if builds %}
+    <p class="sub">Thanks for buying <strong>+downloads for Desktop</strong>. Pick your platform to download the installer.</p>
+    <div class="dl-btns">
+      {% for b in builds %}
+      <a class="dl-btn {% if b.os == detected_os %}primary{% endif %}" href="/desktop/redeem/download?token={{ token|urlencode }}&amp;os={{ b.os }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download for {{ b.label }}
+      </a>
+      {% endfor %}
+    </div>
+    <p class="helper">Your purchase works on every platform &mdash; bookmark this link to grab the others or re-download later. The link is also in your confirmation email.</p>
+    {% else %}
+    <p class="sub">Thanks for buying <strong>+downloads for Desktop</strong>. Your installer download link has been emailed to you &mdash; check your inbox (and your spam folder, just in case).</p>
+    <p class="helper">Didn't get the email within a few minutes? <a href="mailto:digitalsov2026@gmail.com?subject=Desktop%20installer%20link">Contact support</a> and we'll resend your download link.</p>
+    {% endif %}
+    {% elif state == 'pending' %}
+    <div class="spinner" id="spinner"></div>
+    <h1 id="pending-title">Finalizing your purchase</h1>
+    <p class="sub" id="pending-sub">This only takes a few seconds &mdash; hang tight while we confirm your payment.</p>
+    <p class="helper" id="pending-help"></p>
+    {% else %}
+    <div class="icon-badge icon-err">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 8v5m0 3.5h.01M10.3 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.7 3.86a2 2 0 0 0-3.4 0Z" stroke="#ff6b6b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <h1>Something's not right</h1>
+    <p class="sub">{{ message }}</p>
+    <p class="helper">Think this is a mistake? <a href="mailto:digitalsov2026@gmail.com?subject=Desktop%20redeem%20issue">Contact support</a> with the link from your purchase email and we'll sort it out.</p>
+    {% endif %}
+    <a class="back" href="/">&larr; Back to digitaldownloads.space</a>
+  </main>
+  <footer>
+    <a href="/terms">Terms of Service</a>
+    <span class="sep">&middot;</span>
+    <a href="/privacy">Privacy Policy</a>
+  </footer>
+  {% if state == 'pending' %}
+  <script>
+    var TOKEN = {{ token|tojson }};
+    var deadline = Date.now() + 30000;
+    function settle(msg) {
+      var sp = document.getElementById('spinner');
+      if (sp) { sp.style.display = 'none'; }
+      document.getElementById('pending-title').textContent = 'Still processing';
+      document.getElementById('pending-sub').textContent = msg;
+    }
+    function poll() {
+      if (Date.now() > deadline) {
+        settle('We could not confirm a download for this link yet. If you just purchased, wait a moment and refresh this page. If you have already downloaded +downloads, your purchase is still complete — email digitalsov2026@gmail.com to get the installer again.');
+        return;
+      }
+      fetch('/desktop/redeem/status?token=' + encodeURIComponent(TOKEN))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.state === 'confirmed' || d.state === 'error') { window.location.reload(); }
+          else { setTimeout(poll, 1500); }
+        })
+        .catch(function () { setTimeout(poll, 1500); });
+    }
+    setTimeout(poll, 1500);
+  </script>
+  {% endif %}
+</body>
+</html>
+"""
+
+
 def is_valid_url(url: str) -> bool:
     if not url:
         return False
@@ -1801,6 +2861,9 @@ def cleanup_worker():
                         os.rmdir(root)
                     except OSError:
                         pass
+
+        # Drop page-view rows past the retention window
+        _prune_pageviews()
 
 def load_history() -> list:
     if not HISTORY_PATH.exists():
@@ -2713,7 +3776,7 @@ def run_job(job_id: str):
 
 @app.get("/")
 def index():
-    return render_template_string(HTML, version=VERSION)
+    return render_template_string(HTML)
 
 @app.get("/privacy")
 def privacy():
@@ -2732,6 +3795,84 @@ def terms():
         updated=_LEGAL_LAST_UPDATED,
         body=_TERMS_BODY,
     )
+
+@app.get("/desktop/buy")
+def desktop_buy():
+    # Buy buttons on the landing page point here; hop to the payment app's
+    # desktop checkout. Kept as a stable internal URL so the destination can
+    # change via env var without editing the landing-page HTML.
+    return redirect(DESKTOP_PAYMENT_URL, code=302)
+
+
+def _desktop_redeem_state(token: str):
+    """Resolve a desktop redeem token to (state, message).
+
+    state is one of: 'confirmed' (paid desktop token, ready), 'pending' (the
+    Stripe webhook hasn't activated the pre-minted token yet — keep polling),
+    or 'error' (bad token, or an online-tool token used on the wrong page).
+    """
+    if not token or not token.strip():
+        return "error", "This link is missing its purchase token. Use the link from your confirmation email."
+    status = _check_token_status(token.strip())
+    if status.get("valid"):
+        if status.get("product") == "desktop":
+            return "confirmed", ""
+        return "error", "This token is for the online downloader, not the desktop app. Use it on the homepage instead."
+    if not status:
+        # Payment app unreachable or a transient error — let the page poll/retry.
+        return "pending", ""
+    if status.get("product") == "desktop":
+        # Row exists but downloads_remaining is still 0: the checkout.session.completed
+        # webhook hasn't activated it yet. This is the redirect/webhook race.
+        return "pending", ""
+    if status.get("reason") in ("not_found", "missing_token"):
+        return "error", "We couldn't find a purchase for this link. Check that you used the full link from your confirmation email."
+    return "error", "We couldn't verify this purchase. Contact support with the link from your email."
+
+
+@app.get("/desktop/redeem")
+def desktop_redeem():
+    token = request.args.get("token", "")
+    state, message = _desktop_redeem_state(token)
+    detected = _detect_os(request.headers.get("User-Agent", ""))
+    builds = _redeem_build_options(detected) if state == "confirmed" else []
+    return render_template_string(
+        _DESKTOP_REDEEM_HTML,
+        state=state,
+        message=message,
+        token=token,
+        builds=builds,
+        detected_os=detected,
+    )
+
+
+@app.get("/desktop/redeem/status")
+def desktop_redeem_status():
+    token = request.args.get("token", "")
+    state, message = _desktop_redeem_state(token)
+    return {"state": state, "message": message}
+
+
+@app.get("/desktop/redeem/download")
+def desktop_redeem_download():
+    token = request.args.get("token", "")
+    os_key = request.args.get("os", "")
+    if os_key not in _OS_ORDER:
+        abort(400)
+    fn = _load_builds_manifest().get(os_key) or ""
+    path = DESKTOP_BUILDS_DIR / fn if fn else None
+    if not fn or not path.exists():
+        # No build for this OS — send them back to the redeem page.
+        return redirect(f"/desktop/redeem?token={quote(token)}", code=302)
+    # Block burning an online-tool token on the installer.
+    status = _check_token_status(token)
+    if not (status.get("valid") and status.get("product") == "desktop"):
+        return redirect(f"/desktop/redeem?token={quote(token)}", code=302)
+    # Atomically spend one download credit; bail if the token is exhausted.
+    used = _consume_token(token)
+    if not used.get("valid"):
+        return redirect(f"/desktop/redeem?token={quote(token)}", code=302)
+    return send_file(path, as_attachment=True, download_name=fn)
 
 @app.post("/start")
 def start():
@@ -3018,6 +4159,51 @@ def upload_cookies():
     return jsonify({"ok": True})
 
 
+@app.post("/admin/builds/upload")
+def admin_builds_upload():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    if not hmac.compare_digest(request.form.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    os_key = request.form.get("os", "")
+    if os_key not in _OS_ORDER:
+        return jsonify({"error": "Invalid OS"}), 400
+    f = request.files.get("build")
+    if not f or not f.filename:
+        return jsonify({"error": "No file provided"}), 400
+    fn = secure_filename(f.filename)
+    if not fn:
+        return jsonify({"error": "Unusable filename"}), 400
+    DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
+    f.save(DESKTOP_BUILDS_DIR / fn)
+    m = _load_builds_manifest()
+    old = m.get(os_key)
+    m[os_key] = fn
+    _save_builds_manifest(m)
+    if old and old != fn:
+        _maybe_delete_build_file(old, m)
+    return jsonify({"ok": True, "filename": fn})
+
+
+@app.post("/admin/builds/delete")
+def admin_builds_delete():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    data = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    os_key = data.get("os", "")
+    if os_key not in _OS_ORDER:
+        return jsonify({"error": "Invalid OS"}), 400
+    m = _load_builds_manifest()
+    old = m.get(os_key)
+    m[os_key] = ""
+    _save_builds_manifest(m)
+    if old:
+        _maybe_delete_build_file(old, m)
+    return jsonify({"ok": True})
+
+
 @app.post("/admin/stats")
 def admin_stats():
     if not COOKIES_PASSWORD:
@@ -3058,6 +4244,8 @@ def admin_stats():
         "by_type": by_type,
         "recent": history[-50:][::-1],
         "active_jobs": active_jobs,
+        "pageviews": _pageview_analytics(),
+        "builds": _list_desktop_builds(),
     })
 
 
@@ -3168,6 +4356,11 @@ def _global_rate_limit():
 
 @app.after_request
 def add_security_headers(response):
+    try:
+        if request.method == "GET" and request.path in _TRACKED_PAGES and response.status_code < 400:
+            _record_pageview(request.path)
+    except Exception:
+        pass
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
@@ -3190,4 +4383,5 @@ cleanup_thread.start()
 
 if __name__ == "__main__":
     host = os.environ.get("FLASK_HOST", "127.0.0.1")
-    app.run(host=host, port=5055, debug=False, use_reloader=False)
+    port = int(os.environ.get("PORT", "5055"))
+    app.run(host=host, port=port, debug=False, use_reloader=False)
