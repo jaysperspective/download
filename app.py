@@ -1316,7 +1316,7 @@ HTML = r"""
     #meta a { color: #db52a6; text-decoration: none; }
     #meta a:hover { text-decoration: underline; }
 
-    /* Paused / buy-access banners */
+    /* Paused banner */
     .paused-banner {
       display: none; background: #2a1a1a; border: 1.5px solid #e05c5c;
       border-radius: 14px; padding: 18px 22px; margin-bottom: 14px; text-align: center;
@@ -1796,17 +1796,9 @@ HTML = r"""
       <!-- Downloader card -->
       <div id="downloader" class="downloader">
         <div class="paused-banner" id="paused-banner">
-          <h2>Free Service Temporarily Paused</h2>
-          <p>The free web service is currently unavailable. Grab a token below or get the desktop app for unlimited downloads.</p>
+          <h2>Free Service Paused</h2>
+          <p>The free web service is no longer available. Buy a token below to use the online tool, or get the desktop app for unlimited downloads.</p>
           <a class="btn-get-app" href="/desktop/buy">Get the Desktop App</a>
-        </div>
-        <div class="paused-banner" id="buy-access-banner" style="border-color:#db52a6;">
-          <h2 style="color:#db52a6;">Get Instant Access</h2>
-          <p>Purchase a token to use the downloader right now — no account needed, delivered to your email instantly.</p>
-          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-            <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">$1 / 3 downloads</a>
-            <a class="btn-get-app" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer" style="background:#9b3adb;">$5 / 10 downloads</a>
-          </div>
         </div>
 
         <div class="url-row">
@@ -2015,7 +2007,6 @@ async function unlockWithToken() {
       _tokenUnlocked = true;
       showTokenUnlocked(d.remaining);
       document.getElementById('paused-banner').style.display = 'none';
-      document.getElementById('buy-access-banner').style.display = 'none';
       document.getElementById('url').disabled = false;
     } else {
       errEl.textContent = d.reason === 'exhausted'
@@ -2037,16 +2028,13 @@ async function checkPaused() {
     const r = await fetch('/service-status');
     const d = await r.json();
     const banner = document.getElementById('paused-banner');
-    const buyBanner = document.getElementById('buy-access-banner');
     if (d.paused && !_tokenUnlocked) {
       banner.style.display = 'block';
-      buyBanner.style.display = 'block';
       document.getElementById('url').disabled = true;
       document.getElementById('btnDownload').disabled = true;
       document.getElementById('btnInsertToken').disabled = false;
     } else {
       banner.style.display = 'none';
-      buyBanner.style.display = 'none';
       document.getElementById('url').disabled = false;
       document.getElementById('btnDownload').disabled = false;
       document.getElementById('btnInsertToken').disabled = false;
