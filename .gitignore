@@ -20,7 +20,9 @@ history.json
 jobs.json
 job-logs/
 analytics.db
+trial-signups-fallback.jsonl
 desktop-builds/
+desktop-builds-trial/
 
 # OS / editor
 .DS_Store

@@ -11,6 +11,7 @@ services:
       - downloads:/data
       - ./cookies.txt:/cookies.txt
       - ./desktop-builds:/data/desktop-builds
+      - ./desktop-builds-trial:/data/desktop-builds-trial
     environment:
       - YT_UI_COOKIES_PASSWORD=${YT_UI_COOKIES_PASSWORD}
       - YT_UI_COOKIES=/cookies.txt
@@ -33,6 +34,9 @@ services:
       - PAYMENT_APP_URL=${PAYMENT_APP_URL:-http://127.0.0.1:4001}
       - ACCESS_PAYMENT_URL=${ACCESS_PAYMENT_URL}
       - DESKTOP_BUILDS_DIR=/data/desktop-builds
+      - DESKTOP_BUILDS_TRIAL_DIR=/data/desktop-builds-trial
+      - KIT_API_KEY=${KIT_API_KEY}
+      - KIT_TRIAL_TAG_ID=${KIT_TRIAL_TAG_ID}
 
 volumes:
   downloads:

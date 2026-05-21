@@ -50,7 +50,7 @@ LOG_DIR.mkdir(exist_ok=True)
 # storage — so it stays compatible with the "no user-tracking" privacy policy.
 ANALYTICS_DB = _data_dir / "analytics.db"
 _analytics_lock = threading.Lock()
-_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/privacy", "/terms"}
+_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/privacy", "/terms"}
 PAGEVIEW_RETENTION_DAYS = 90
 
 def _analytics_conn():
@@ -165,6 +165,25 @@ ACCESS_PAYMENT_URL = os.environ.get("ACCESS_PAYMENT_URL", "http://localhost:4001
 DESKTOP_PAYMENT_URL = os.environ.get("DESKTOP_PAYMENT_URL", f"{ACCESS_PAYMENT_URL}?product=desktop")
 DESKTOP_BUILDS_DIR = Path(os.environ.get("DESKTOP_BUILDS_DIR") or (_data_dir / "desktop-builds"))
 DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
+# Free-trial edition installers live in their own folder — never mixed with the
+# paid builds above. Same manifest shape, served token-less from /trial.
+DESKTOP_BUILDS_TRIAL_DIR = Path(os.environ.get("DESKTOP_BUILDS_TRIAL_DIR") or (_data_dir / "desktop-builds-trial"))
+DESKTOP_BUILDS_TRIAL_DIR.mkdir(parents=True, exist_ok=True)
+
+# Free-trial email gate. /trial reveals the download only after the visitor
+# submits an email, which is added to the Kit "desktop-trial" tag. Soft gate:
+# a signed cookie remembers the unlock so return visits skip the form. If the
+# Kit call fails the email is appended to a local fallback file so no lead is
+# lost and the download still unlocks.
+KIT_API_KEY = os.environ.get("KIT_API_KEY", "")
+KIT_TRIAL_TAG_ID = os.environ.get("KIT_TRIAL_TAG_ID", "")
+_TRIAL_COOKIE = "trial_unlocked"
+_TRIAL_COOKIE_SIG = hmac.new(
+    (TOKEN_INTERNAL_SECRET or "trial-gate").encode(), b"trial-unlocked-v1", "sha256"
+).hexdigest()
+_TRIAL_SIGNUPS_FALLBACK = _data_dir / "trial-signups-fallback.jsonl"
+_trial_lock = threading.Lock()
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def _load_paused() -> bool:
     try:
@@ -284,47 +303,54 @@ def _check_token_status(token: str) -> dict:
         return {}
     return result if isinstance(result, dict) else {}
 
-# Desktop installer builds — manifest maps each OS slot to a filename in DESKTOP_BUILDS_DIR.
+# Desktop installer builds — manifest maps each OS slot to a filename in a
+# builds dir. The paid app uses DESKTOP_BUILDS_DIR; the free trial uses
+# DESKTOP_BUILDS_TRIAL_DIR. Every helper takes the dir so the two channels
+# share code but never share files or manifests.
 _OS_ORDER = ("mac", "win", "linux")
 _OS_LABELS = {"mac": "macOS", "win": "Windows", "linux": "Linux"}
 
-def _builds_manifest_path() -> Path:
-    return DESKTOP_BUILDS_DIR / "manifest.json"
+def _builds_dir_for(edition: str) -> Path:
+    """Map an edition name ('full' | 'trial') to its builds directory."""
+    return DESKTOP_BUILDS_TRIAL_DIR if edition == "trial" else DESKTOP_BUILDS_DIR
 
-def _load_builds_manifest() -> dict:
+def _builds_manifest_path(builds_dir: Path = DESKTOP_BUILDS_DIR) -> Path:
+    return builds_dir / "manifest.json"
+
+def _load_builds_manifest(builds_dir: Path = DESKTOP_BUILDS_DIR) -> dict:
     try:
-        m = json.loads(_builds_manifest_path().read_text())
+        m = json.loads(_builds_manifest_path(builds_dir).read_text())
         if isinstance(m, dict):
             return m
     except Exception:
         pass
     return {}
 
-def _save_builds_manifest(m: dict):
-    DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
-    _builds_manifest_path().write_text(json.dumps(m, indent=2))
+def _save_builds_manifest(m: dict, builds_dir: Path = DESKTOP_BUILDS_DIR):
+    builds_dir.mkdir(parents=True, exist_ok=True)
+    _builds_manifest_path(builds_dir).write_text(json.dumps(m, indent=2))
 
-def _list_desktop_builds() -> dict:
+def _list_desktop_builds(builds_dir: Path = DESKTOP_BUILDS_DIR) -> dict:
     """Per-OS build slots for the admin page: {os: {filename, size} or None}."""
-    m = _load_builds_manifest()
+    m = _load_builds_manifest(builds_dir)
     slots = {}
     for os_key in _OS_ORDER:
         fn = m.get(os_key) or ""
         info = None
         if fn:
-            p = DESKTOP_BUILDS_DIR / fn
+            p = builds_dir / fn
             if p.exists():
                 info = {"filename": fn, "size": p.stat().st_size}
         slots[os_key] = info
     return slots
 
-def _maybe_delete_build_file(filename: str, manifest: dict):
+def _maybe_delete_build_file(filename: str, manifest: dict, builds_dir: Path = DESKTOP_BUILDS_DIR):
     """Delete a build file once no manifest slot still references it."""
     if not filename or filename in {manifest.get(k) for k in _OS_ORDER}:
         return
     try:
-        p = DESKTOP_BUILDS_DIR / filename
-        if p.exists() and p.parent == DESKTOP_BUILDS_DIR:
+        p = builds_dir / filename
+        if p.exists() and p.parent == builds_dir:
             p.unlink()
     except Exception:
         pass
@@ -342,13 +368,47 @@ def _detect_os(ua: str) -> str:
         return "linux"
     return ""
 
-def _redeem_build_options(detected: str) -> list:
+def _redeem_build_options(detected: str, builds_dir: Path = DESKTOP_BUILDS_DIR) -> list:
     """Available download options for the redeem page, detected OS listed first."""
-    slots = _list_desktop_builds()
+    slots = _list_desktop_builds(builds_dir)
     avail = [k for k in _OS_ORDER if slots.get(k)]
     if detected in avail:
         avail = [detected] + [k for k in avail if k != detected]
     return [{"os": k, "label": _OS_LABELS[k]} for k in avail]
+
+
+def _trial_unlocked(req) -> bool:
+    """True once the visitor has cleared the /trial email gate (signed cookie)."""
+    return req.cookies.get(_TRIAL_COOKIE) == _TRIAL_COOKIE_SIG
+
+
+def _kit_subscribe_trial(email: str) -> bool:
+    """Add an email to the Kit 'desktop-trial' tag. Returns True on a 2xx."""
+    if not KIT_API_KEY or not KIT_TRIAL_TAG_ID:
+        return False
+    try:
+        body = json.dumps({"api_key": KIT_API_KEY, "email": email}).encode()
+        req = urllib.request.Request(
+            f"https://api.convertkit.com/v3/tags/{KIT_TRIAL_TAG_ID}/subscribe",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def _record_trial_signup_fallback(email: str):
+    """Persist a signup locally when the Kit call fails — no lead is lost."""
+    try:
+        line = json.dumps({"email": email, "ts": datetime.utcnow().isoformat()})
+        with _trial_lock:
+            with open(_TRIAL_SIGNUPS_FALLBACK, "a") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
 
 YT_DLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
@@ -699,6 +759,44 @@ ADMIN_HTML = """
         <div id="build-msg"></div>
       </div>
 
+      <div class="card">
+        <div class="card-title">Trial Installer Builds</div>
+        <div class="build-row">
+          <div class="build-top">
+            <span class="build-os">macOS</span>
+            <span class="build-cur none" id="build-cur-trial-mac">Load stats to view</span>
+          </div>
+          <div class="build-actions">
+            <input type="file" id="bf-trial-mac">
+            <button class="build-btn up" onclick="uploadBuild('mac', 'trial')">Upload</button>
+            <button class="build-btn del" id="build-del-trial-mac" onclick="deleteBuild('mac', 'trial')" style="display:none">Delete</button>
+          </div>
+        </div>
+        <div class="build-row">
+          <div class="build-top">
+            <span class="build-os">Windows</span>
+            <span class="build-cur none" id="build-cur-trial-win">Load stats to view</span>
+          </div>
+          <div class="build-actions">
+            <input type="file" id="bf-trial-win">
+            <button class="build-btn up" onclick="uploadBuild('win', 'trial')">Upload</button>
+            <button class="build-btn del" id="build-del-trial-win" onclick="deleteBuild('win', 'trial')" style="display:none">Delete</button>
+          </div>
+        </div>
+        <div class="build-row">
+          <div class="build-top">
+            <span class="build-os">Linux</span>
+            <span class="build-cur none" id="build-cur-trial-linux">Load stats to view</span>
+          </div>
+          <div class="build-actions">
+            <input type="file" id="bf-trial-linux">
+            <button class="build-btn up" onclick="uploadBuild('linux', 'trial')">Upload</button>
+            <button class="build-btn del" id="build-del-trial-linux" onclick="deleteBuild('linux', 'trial')" style="display:none">Delete</button>
+          </div>
+        </div>
+        <div id="build-msg-trial"></div>
+      </div>
+
       <div class="section-head">Page Views</div>
       <div class="stat-grid" id="pv-grid"></div>
       <div class="card">
@@ -876,7 +974,7 @@ ADMIN_HTML = """
     function renderStats(d) {
       document.getElementById('stats-section').style.display = 'block';
       renderPageviews(d.pageviews);
-      renderBuilds(d.builds);
+      renderBuilds(d.builds, d.trial_builds);
 
       // Summary cards
       const total    = d.total_history;
@@ -1006,12 +1104,18 @@ ADMIN_HTML = """
       return n.toFixed(i ? 1 : 0) + ' ' + u[i];
     }
 
-    function renderBuilds(builds) {
+    function buildKey(os, edition) {
+      return (edition === 'trial' ? 'trial-' : '') + os;
+    }
+
+    function renderBuildSet(builds, edition) {
       builds = builds || {};
       ['mac', 'win', 'linux'].forEach(function (os) {
+        var k = buildKey(os, edition);
+        var cur = document.getElementById('build-cur-' + k);
+        var del = document.getElementById('build-del-' + k);
+        if (!cur) return;
         var slot = builds[os];
-        var cur = document.getElementById('build-cur-' + os);
-        var del = document.getElementById('build-del-' + os);
         if (slot) {
           cur.textContent = slot.filename + ' · ' + fmtBytes(slot.size);
           cur.className = 'build-cur ok';
@@ -1024,9 +1128,16 @@ ADMIN_HTML = """
       });
     }
 
-    async function uploadBuild(os) {
-      var msg = document.getElementById('build-msg');
-      var file = document.getElementById('bf-' + os).files[0];
+    function renderBuilds(builds, trialBuilds) {
+      renderBuildSet(builds, 'full');
+      renderBuildSet(trialBuilds, 'trial');
+    }
+
+    async function uploadBuild(os, edition) {
+      edition = edition || 'full';
+      var k = buildKey(os, edition);
+      var msg = document.getElementById(edition === 'trial' ? 'build-msg-trial' : 'build-msg');
+      var file = document.getElementById('bf-' + k).files[0];
       if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
       if (!file) { msg.textContent = 'Choose a ' + os + ' file first.'; msg.className = 'err'; return; }
       msg.textContent = 'Uploading ' + file.name + '…'; msg.className = '';
@@ -1034,30 +1145,32 @@ ADMIN_HTML = """
         var fd = new FormData();
         fd.append('password', pw());
         fd.append('os', os);
+        fd.append('edition', edition);
         fd.append('build', file);
         var r = await fetch('/admin/builds/upload', { method: 'POST', body: fd });
         var j = await r.json();
         if (!r.ok) { msg.textContent = j.error || 'Upload failed.'; msg.className = 'err'; return; }
         msg.textContent = 'Uploaded ' + j.filename; msg.className = 'ok';
-        document.getElementById('bf-' + os).value = '';
+        document.getElementById('bf-' + k).value = '';
         loadStats();
       } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
     }
 
-    async function deleteBuild(os) {
-      var msg = document.getElementById('build-msg');
+    async function deleteBuild(os, edition) {
+      edition = edition || 'full';
+      var msg = document.getElementById(edition === 'trial' ? 'build-msg-trial' : 'build-msg');
       if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
-      if (!confirm('Remove the ' + os + ' build?')) return;
+      if (!confirm('Remove the ' + os + ' ' + edition + ' build?')) return;
       msg.textContent = 'Removing…'; msg.className = '';
       try {
         var r = await fetch('/admin/builds/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pw(), os: os })
+          body: JSON.stringify({ password: pw(), os: os, edition: edition })
         });
         var j = await r.json();
         if (!r.ok) { msg.textContent = j.error || 'Delete failed.'; msg.className = 'err'; return; }
-        msg.textContent = 'Removed ' + os + ' build.'; msg.className = 'ok';
+        msg.textContent = 'Removed ' + os + ' ' + edition + ' build.'; msg.className = 'ok';
         loadStats();
       } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
     }
@@ -1401,6 +1514,18 @@ HTML = r"""
     }
     .trust-row .trust { display: inline-flex; align-items: center; gap: 6px; }
     .trust-row .trust svg { color: #48c78e; }
+    .trial-cta { margin-top: 16px; }
+    .btn-trial {
+      display: inline-flex; align-items: center; gap: 10px;
+      background: linear-gradient(95deg, #c9a53e 0%, #ad8c30 100%);
+      color: #1a1818; padding: 16px 32px; border-radius: 12px;
+      font-size: 16px; font-weight: 800; text-decoration: none;
+      box-shadow: 0 10px 28px rgba(191,155,58,0.26);
+      transition: transform 0.15s, box-shadow 0.15s;
+      border: none;
+    }
+    .btn-trial:hover { transform: translateY(-2px); box-shadow: 0 16px 36px rgba(191,155,58,0.40); }
+    .btn-trial:active { transform: translateY(0); }
     .btn-buy {
       display: inline-flex; align-items: center; gap: 10px;
       background: linear-gradient(95deg, #db52a6 0%, #c44e9a 100%);
@@ -1632,6 +1757,12 @@ HTML = r"""
           <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Free updates forever</span>
           <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>macOS, Windows &amp; Linux</span>
           <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Auto-download after checkout</span>
+        </div>
+        <div class="trial-cta">
+          <a class="btn-trial" href="/trial">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Try the <span class="tg">free trial</span> &mdash; no payment
+          </a>
         </div>
       </div>
 
@@ -2439,6 +2570,7 @@ _PRIVACY_BODY = """
   <li><strong>Server logs.</strong> Standard web server logs may record IP address, user agent, request path, and timestamps for security and abuse prevention. Logs are rotated and not used to build user profiles.</li>
   <li><strong>Cookies.</strong> The site uses functional cookies only (e.g., to remember UI preferences and to maintain your session for the duration of an active download). No cross-site tracking cookies are set by us.</li>
   <li><strong>Advertising.</strong> The site loads Google AdSense scripts. Google may use cookies and similar technologies to serve ads; please refer to <a href="https://policies.google.com/technologies/ads">Google's Ads policy</a> for details. You can opt out of personalized ads at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>.</li>
+  <li><strong>Free-trial email.</strong> To download the free trial of the desktop app, you provide an email address. That address is added to our mailing list, operated by <a href="https://kit.com">Kit</a> (formerly ConvertKit), so we can let you know when a new version of the app is available. Providing an email is required only for the free trial; you can unsubscribe at any time using the link in any email we send.</li>
 </ul>
 
 <h3>iOS app (+downloads)</h3>
@@ -2464,13 +2596,14 @@ _PRIVACY_BODY = """
 </ul>
 
 <h2>3. Information We Do Not Collect</h2>
-<p>We do not collect names, email addresses, phone numbers, payment information, contacts, microphone input, or camera input. The iOS app does not include a third-party analytics SDK and does not implement Apple's App Tracking Transparency tracking.</p>
+<p>We do not collect names, phone numbers, payment information, contacts, microphone input, or camera input. The only personal information we collect is the email address you voluntarily submit to download the free trial, as described above. The iOS app does not include a third-party analytics SDK and does not implement Apple's App Tracking Transparency tracking.</p>
 
 <h2>4. Sharing</h2>
 <p>We do not sell or rent personal information. Limited disclosure may occur in the following cases:</p>
 <ul>
   <li><strong>Service providers.</strong> Hosting and DNS providers process traffic on our behalf to operate the website.</li>
   <li><strong>Advertising partners.</strong> Google AdSense receives request information necessary to serve ads, as described above.</li>
+  <li><strong>Email provider.</strong> Email addresses submitted for the free-trial signup are stored and processed by Kit (ConvertKit), our mailing-list provider, under their own privacy policy.</li>
   <li><strong>Apple platform services.</strong> The iOS app uses MusicKit, MetricKit, iCloud Drive, and iCloud Key-Value Store, which exchange data directly between your device and Apple under Apple's privacy policy.</li>
   <li><strong>Optional third-party services.</strong> When you use the iOS app's optional features for track identification (AcoustID), lyrics (LRClib), or pCloud playback, your device communicates directly with those services. We do not relay or intermediate that traffic, and each provider's own privacy policy applies to the data they receive.</li>
   <li><strong>Legal compliance.</strong> Information may be disclosed when required by law, subpoena, or to protect rights, safety, or property.</li>
@@ -2496,6 +2629,7 @@ _PRIVACY_BODY = """
   <li>In iOS Settings, you can revoke Apple Music, location, or iCloud permissions for the app individually.</li>
   <li>You can clear locally saved diagnostic reports from inside the iOS app's Settings screen.</li>
   <li>You can opt out of personalized advertising via Google's controls noted above.</li>
+  <li>You can unsubscribe from the free-trial mailing list at any time using the link in any email we send.</li>
 </ul>
 
 <h2>9. Security</h2>
@@ -2567,7 +2701,7 @@ _TERMS_BODY = """
 <p>Questions about these Terms can be sent through the contact form on <a href="https://digitaldownloads.space">digitaldownloads.space</a>.</p>
 """
 
-_LEGAL_LAST_UPDATED = "May 18, 2026"
+_LEGAL_LAST_UPDATED = "May 21, 2026"
 
 
 _DESKTOP_REDEEM_HTML = """<!doctype html>
@@ -2731,6 +2865,173 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
     setTimeout(poll, 1500);
   </script>
   {% endif %}
+</body>
+</html>
+"""
+
+
+# Free-trial download page — public, token-less (same access model as
+# /desktop/update). Sells the upgrade: trial framing + a prominent buy-page CTA.
+_DESKTOP_TRIAL_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1a1818">
+  <title>Free Trial &middot; +downloads for Desktop</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1818; color: #f0eef0; min-height: 100vh;
+    }
+    .header {
+      background: #242222; border-bottom: 1px solid #2e2c2c;
+      padding: 0 32px; height: 62px; display: flex; align-items: center; gap: 12px;
+    }
+    .logo { font-size: 24px; font-weight: 800; color: #db52a6; text-decoration: none; letter-spacing: -0.5px; white-space: nowrap; }
+    .logo .lo-prefix { color: #f0eef0; font-weight: 700; margin-right: 4px; }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 56px 24px 80px; text-align: center; }
+    .badge {
+      display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: 0.6px;
+      text-transform: uppercase; color: #bf9b3a; background: rgba(191,155,58,0.12);
+      border: 1px solid rgba(191,155,58,0.32); border-radius: 999px; padding: 5px 14px; margin-bottom: 18px;
+    }
+    h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.6px; margin-bottom: 12px; }
+    .sub { font-size: 15px; color: #aaa6aa; line-height: 1.65; margin-bottom: 6px; }
+    .sub strong { color: #f0eef0; font-weight: 600; }
+    .dl-btns { display: flex; flex-direction: column; gap: 10px; max-width: 340px; margin: 24px auto 0; }
+    .dl-btn {
+      display: flex; align-items: center; justify-content: center; gap: 9px;
+      padding: 14px 20px; border-radius: 12px; font-size: 15px; font-weight: 700;
+      text-decoration: none; background: #242222; border: 1px solid #353333; color: #f0eef0;
+      transition: border-color 0.15s, transform 0.1s;
+    }
+    .dl-btn:hover { border-color: #db52a6; }
+    .dl-btn:active { transform: scale(0.98); }
+    .dl-btn.primary {
+      background: linear-gradient(95deg, #db52a6 0%, #c44e9a 100%);
+      border-color: transparent; color: #fff; box-shadow: 0 8px 22px rgba(219,82,166,0.26);
+    }
+    .dl-btn svg { flex-shrink: 0; }
+    .gate { display: flex; flex-direction: column; gap: 10px; max-width: 340px; margin: 24px auto 0; }
+    .gate input {
+      width: 100%; padding: 13px 16px; border-radius: 11px; font-size: 15px;
+      background: #1f1d1d; border: 1px solid #353333; color: #f0eef0; outline: none;
+      transition: border-color 0.15s;
+    }
+    .gate input::placeholder { color: #6c686c; }
+    .gate input:focus { border-color: #db52a6; }
+    .gate button {
+      padding: 14px 20px; border-radius: 12px; font-size: 15px; font-weight: 800;
+      border: none; cursor: pointer; color: #fff;
+      background: linear-gradient(95deg, #db52a6 0%, #c44e9a 100%);
+      box-shadow: 0 8px 22px rgba(219,82,166,0.26); transition: transform 0.1s;
+    }
+    .gate button:active { transform: scale(0.98); }
+    .gate-note { font-size: 12px; color: #777; line-height: 1.5; }
+    .gate-err { font-size: 13px; color: #ff6b6b; font-weight: 600; }
+    .limits {
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 14px;
+      padding: 16px 20px; margin: 26px auto 0; max-width: 420px; text-align: left;
+    }
+    .limits .lt { font-size: 13px; font-weight: 700; color: #f0eef0; margin-bottom: 8px; }
+    .limit { display: flex; align-items: flex-start; gap: 9px; font-size: 13.5px; color: #c8c4c8; margin: 6px 0; line-height: 1.5; }
+    .limit svg { flex-shrink: 0; margin-top: 2px; }
+    .limit strong { color: #f0eef0; font-weight: 600; }
+    .upgrade {
+      background: linear-gradient(160deg, #2a2026 0%, #242222 100%);
+      border: 1px solid #3a2e36; border-radius: 16px;
+      padding: 24px 22px; margin: 30px auto 0; max-width: 440px;
+    }
+    .upgrade h2 { font-size: 19px; font-weight: 800; letter-spacing: -0.3px; margin-bottom: 8px; }
+    .upgrade p { font-size: 14px; color: #aaa6aa; line-height: 1.6; margin-bottom: 16px; }
+    .btn-buy {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 14px 26px; border-radius: 12px; font-size: 15px; font-weight: 800;
+      text-decoration: none; background: linear-gradient(95deg, #db52a6 0%, #c44e9a 100%);
+      color: #fff; box-shadow: 0 8px 22px rgba(219,82,166,0.30);
+      transition: transform 0.1s;
+    }
+    .btn-buy:active { transform: scale(0.98); }
+    .upgrade .price { font-size: 13px; color: #777; margin-top: 12px; }
+    .helper { font-size: 13px; color: #777; margin-top: 24px; line-height: 1.6; }
+    .helper a { color: #bf9b3a; }
+    .back {
+      display: inline-block; margin-top: 28px; padding: 10px 18px;
+      background: #242222; border: 1px solid #353333; border-radius: 10px;
+      color: #aaa; text-decoration: none; font-size: 13px;
+    }
+    .back:hover { color: #db52a6; border-color: #db52a6; }
+    footer { text-align: center; padding: 22px 16px; font-size: 12px; color: #555; }
+    footer a { color: #888; text-decoration: none; }
+    footer .sep { margin: 0 8px; color: #3a3838; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
+  </header>
+  <main class="wrap">
+    <span class="badge">Free Trial</span>
+    <h1>Try +downloads for Desktop &mdash; free</h1>
+    {% if unlocked and builds %}
+    <p class="sub">You're in &mdash; the free trial downloads from <strong>YouTube</strong> at no cost. Pick your platform to get started.</p>
+    <div class="dl-btns">
+      {% for b in builds %}
+      <a class="dl-btn {% if b.os == detected_os %}primary{% endif %}" href="/trial?os={{ b.os }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download for {{ b.label }}
+      </a>
+      {% endfor %}
+    </div>
+    {% elif unlocked and not builds %}
+    <p class="sub">The free trial installer isn't available right now &mdash; please check back shortly.</p>
+    {% else %}
+    <p class="sub">A free, <strong>YouTube-only</strong> taste of the desktop app. Enter your email and we'll unlock the download.</p>
+    <form class="gate" method="post" action="/trial/unlock">
+      <input type="email" name="email" placeholder="you@example.com" required autocomplete="email" autofocus>
+      <button type="submit">Get the free trial &rarr;</button>
+      {% if error %}<div class="gate-err">Please enter a valid email address.</div>{% endif %}
+      <div class="gate-note">We'll email you when a new version ships. No spam &mdash; unsubscribe anytime.</div>
+    </form>
+    {% endif %}
+    <div class="limits">
+      <div class="lt">Free trial &mdash; what to expect</div>
+      <div class="limit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="#48c78e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Download video &amp; audio from <strong>YouTube</strong></span>
+      </div>
+      <div class="limit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M18 6 6 18M6 6l12 12" stroke="#ff6b6b" stroke-width="2.2" stroke-linecap="round"/></svg>
+        <span>YouTube only &mdash; SoundCloud, Spotify &amp; Apple Music need the full app</span>
+      </div>
+      <div class="limit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#bf9b3a" stroke-width="2"/><path d="M12 7.5v5l3.5 2" stroke="#bf9b3a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Works for <strong>7 days</strong> from first launch</span>
+      </div>
+      <div class="limit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 19V11M12 19V5M19 19v-7" stroke="#bf9b3a" stroke-width="2.2" stroke-linecap="round"/></svg>
+        <span>Up to <strong>5 downloads per day</strong></span>
+      </div>
+    </div>
+    <div class="upgrade">
+      <h2>Want every supported site?</h2>
+      <p>The full +downloads desktop app unlocks every supported site &mdash; no 7-day limit, no daily cap, plus auto-tagging, organizing &amp; iOS sync. One payment, free updates forever.</p>
+      <a class="btn-buy" href="/?ref=trial-page">Get the full app &rarr;</a>
+      <div class="price">One-time purchase &middot; works on macOS, Windows &amp; Linux</div>
+    </div>
+    <p class="helper">The trial is free to download and share. Bookmark this page to grab it again later.</p>
+    <a class="back" href="/">&larr; Back to digitaldownloads.space</a>
+  </main>
+  <footer>
+    <a href="/terms">Terms of Service</a>
+    <span class="sep">&middot;</span>
+    <a href="/privacy">Privacy Policy</a>
+  </footer>
 </body>
 </html>
 """
@@ -3905,6 +4206,53 @@ def desktop_update():
         detected_os=detected,
     )
 
+
+@app.get("/trial")
+def desktop_trial():
+    """Free-trial download page. Public and token-less — serves the
+    feature-limited trial installers from DESKTOP_BUILDS_TRIAL_DIR, never the
+    paid builds. An email gate (see /trial/unlock) reveals the download; a
+    signed cookie remembers the unlock. With ?os= it streams the installer."""
+    os_key = request.args.get("os", "")
+    if os_key:
+        if os_key not in _OS_ORDER:
+            abort(400)
+        # The installer download is gated behind the email form.
+        if not _trial_unlocked(request):
+            return redirect("/trial")
+        fn = _load_builds_manifest(DESKTOP_BUILDS_TRIAL_DIR).get(os_key) or ""
+        path = DESKTOP_BUILDS_TRIAL_DIR / fn if fn else None
+        if not fn or not path.exists():
+            abort(404)
+        return send_file(path, as_attachment=True, download_name=fn)
+    detected = _detect_os(request.headers.get("User-Agent", ""))
+    return render_template_string(
+        _DESKTOP_TRIAL_HTML,
+        builds=_redeem_build_options(detected, DESKTOP_BUILDS_TRIAL_DIR),
+        detected_os=detected,
+        unlocked=_trial_unlocked(request),
+        error=request.args.get("e") == "1",
+    )
+
+
+@app.post("/trial/unlock")
+def desktop_trial_unlock():
+    """Email gate for /trial — validates the email, adds it to the Kit
+    'desktop-trial' tag (local fallback on API failure), sets the unlock
+    cookie, and redirects back to /trial with the download revealed."""
+    email = (request.form.get("email") or "").strip().lower()
+    if not email or len(email) > 254 or not _EMAIL_RE.match(email):
+        return redirect("/trial?e=1")
+    if not _kit_subscribe_trial(email):
+        _record_trial_signup_fallback(email)
+    resp = make_response(redirect("/trial"))
+    resp.set_cookie(
+        _TRIAL_COOKIE, _TRIAL_COOKIE_SIG,
+        max_age=180 * 24 * 3600, httponly=True, samesite="Lax",
+    )
+    return resp
+
+
 @app.post("/start")
 def start():
     data = request.get_json() or {}
@@ -4199,20 +4547,24 @@ def admin_builds_upload():
     os_key = request.form.get("os", "")
     if os_key not in _OS_ORDER:
         return jsonify({"error": "Invalid OS"}), 400
+    edition = request.form.get("edition", "full")
+    if edition not in ("full", "trial"):
+        return jsonify({"error": "Invalid edition"}), 400
+    builds_dir = _builds_dir_for(edition)
     f = request.files.get("build")
     if not f or not f.filename:
         return jsonify({"error": "No file provided"}), 400
     fn = secure_filename(f.filename)
     if not fn:
         return jsonify({"error": "Unusable filename"}), 400
-    DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
-    f.save(DESKTOP_BUILDS_DIR / fn)
-    m = _load_builds_manifest()
+    builds_dir.mkdir(parents=True, exist_ok=True)
+    f.save(builds_dir / fn)
+    m = _load_builds_manifest(builds_dir)
     old = m.get(os_key)
     m[os_key] = fn
-    _save_builds_manifest(m)
+    _save_builds_manifest(m, builds_dir)
     if old and old != fn:
-        _maybe_delete_build_file(old, m)
+        _maybe_delete_build_file(old, m, builds_dir)
     return jsonify({"ok": True, "filename": fn})
 
 
@@ -4226,12 +4578,16 @@ def admin_builds_delete():
     os_key = data.get("os", "")
     if os_key not in _OS_ORDER:
         return jsonify({"error": "Invalid OS"}), 400
-    m = _load_builds_manifest()
+    edition = data.get("edition", "full")
+    if edition not in ("full", "trial"):
+        return jsonify({"error": "Invalid edition"}), 400
+    builds_dir = _builds_dir_for(edition)
+    m = _load_builds_manifest(builds_dir)
     old = m.get(os_key)
     m[os_key] = ""
-    _save_builds_manifest(m)
+    _save_builds_manifest(m, builds_dir)
     if old:
-        _maybe_delete_build_file(old, m)
+        _maybe_delete_build_file(old, m, builds_dir)
     return jsonify({"ok": True})
 
 
@@ -4277,6 +4633,7 @@ def admin_stats():
         "active_jobs": active_jobs,
         "pageviews": _pageview_analytics(),
         "builds": _list_desktop_builds(),
+        "trial_builds": _list_desktop_builds(DESKTOP_BUILDS_TRIAL_DIR),
     })
 
 
@@ -4390,6 +4747,14 @@ def add_security_headers(response):
     try:
         if request.method == "GET" and request.path in _TRACKED_PAGES and response.status_code < 400:
             _record_pageview(request.path)
+            # Conversion attribution: when the landing page is hit with a ?ref=
+            # tag (e.g. the trial app's in-app Upgrade CTA uses ?ref=trial, the
+            # /trial web page uses ?ref=trial-page), also count it under a
+            # distinct path so the admin Top Pages list surfaces referred visits.
+            if request.path == "/":
+                ref = re.sub(r"[^a-z0-9_-]", "", request.args.get("ref", "").lower())[:32]
+                if ref:
+                    _record_pageview("/?ref=" + ref)
     except Exception:
         pass
     response.headers["Content-Security-Policy"] = (
