@@ -1,10 +1,10 @@
 # +downloads — codebase notes for Claude
 
-A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $1.99 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live.
+A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $1.99 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live. A free, feature-limited **trial edition** is offered at `/trial` behind an email gate (live since 2026-05-21).
 
 ## Project shape
 
-**One file does almost everything.** `app.py` is ~3800 lines: Flask routes, job runner, queue/dispatcher, token gate, page-view analytics, history, admin, and **four large inline HTML templates as Python string constants**. Do not split into modules unless explicitly asked — the user prefers the single-file layout.
+**One file does almost everything.** `app.py` is ~4200 lines: Flask routes, job runner, queue/dispatcher, token gate, page-view analytics, history, admin, and **five large inline HTML templates as Python string constants**. Do not split into modules unless explicitly asked — the user prefers the single-file layout.
 
 Important globals & locations (verify line numbers before quoting — file is actively edited):
 
@@ -13,6 +13,7 @@ Important globals & locations (verify line numbers before quoting — file is ac
   - `ADMIN_HTML` — `/admin`. Standard `"""..."""`.
   - `_LEGAL_PAGE_TEMPLATE` + `_PRIVACY_BODY` + `_TERMS_BODY` — `/privacy` and `/terms`.
   - `_DESKTOP_REDEEM_HTML` — shared template for `/desktop/redeem` (confirmed / pending / error states) and `/desktop/update` (the `update` state).
+  - `_DESKTOP_TRIAL_HTML` — `/trial`, the free-trial page. Renders an email-gate form or the OS-detected download buttons depending on the `unlocked` flag.
 - **Token gate** (~line 75–200): `_is_token_valid()` / `_consume_token()` call the payment app at `PAYMENT_APP_URL/payment/api/access/internal/token/{check,use}`, authed with `TOKEN_INTERNAL_SECRET` (`x-internal-secret` header). `_check_token_status()` is the uncached variant returning the full check JSON (`product`, `reason`). Checkout URLs: `ACCESS_PAYMENT_URL` (online), `DESKTOP_PAYMENT_URL` (desktop, defaults to `ACCESS_PAYMENT_URL?product=desktop`).
 - **Desktop paywall**: `/desktop/buy` (302 → checkout) · `/desktop/redeem` (post-purchase, token-gated, polls `/desktop/redeem/status` for the webhook race) · `/desktop/redeem/download` (consumes a credit, serves the installer) · `/desktop/update` (token-less free-update download). Installers resolve via `_load_builds_manifest()` from `DESKTOP_BUILDS_DIR`.
 - **Page-view analytics**: first-party, no cookies/IPs. SQLite at `ANALYTICS_DB` (under the state dir, gitignored). `_record_pageview()` runs inside `add_security_headers` for an allowlist of pages; `_pageview_analytics()` aggregates for `/admin`; rows pruned after 90 days.
@@ -63,7 +64,7 @@ python app.py                       # dev server on 127.0.0.1:5055
 
 `DOWNLOAD_DIR` and `YT_UI_STATE_DIR` can be redirected (e.g. `DOWNLOAD_DIR=/tmp/yt_smoke_dl YT_UI_STATE_DIR=/tmp/yt_smoke_state python app.py`) for isolated smoke tests. The port defaults to `5055` but honors a `PORT` env var, so a smoke-test instance can run alongside a server already on 5055.
 
-Production runs in Docker via `docker-compose.yml` on a DigitalOcean droplet. **The container uses `network_mode: host`** — required so it can reach the payment app on the host's `127.0.0.1:4001`: the payment app's internal API binds loopback only, and its public hostname is behind Cloudflare which 403s scripted requests. `PAYMENT_APP_URL` must therefore be `http://127.0.0.1:4001` in prod. The `desktop-builds/` dir is bind-mounted to `/data/desktop-builds`. SSH access and deploy steps are in the [server access memory](~/.claude/projects/-Users-joshuaharrington-yt-web-ui/memory/reference_server_access.md).
+Production runs in Docker via `docker-compose.yml` on a DigitalOcean droplet. **The container uses `network_mode: host`** — required so it can reach the payment app on the host's `127.0.0.1:4001`: the payment app's internal API binds loopback only, and its public hostname is behind Cloudflare which 403s scripted requests. `PAYMENT_APP_URL` must therefore be `http://127.0.0.1:4001` in prod. The `desktop-builds/` and `desktop-builds-trial/` dirs are bind-mounted to `/data/desktop-builds{,-trial}` (both must exist on the host before `docker compose up`). `KIT_API_KEY` + `KIT_TRIAL_TAG_ID` live in the server's `.env`. SSH access and deploy steps are in the [server access memory](~/.claude/projects/-Users-joshuaharrington-yt-web-ui/memory/reference_server_access.md).
 
 ## YouTube cookies
 
