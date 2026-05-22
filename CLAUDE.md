@@ -4,7 +4,7 @@ A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-d
 
 ## Project shape
 
-**One file does almost everything.** `app.py` is ~4200 lines: Flask routes, job runner, queue/dispatcher, token gate, page-view analytics, history, admin, and **five large inline HTML templates as Python string constants**. Do not split into modules unless explicitly asked — the user prefers the single-file layout.
+**One file does almost everything.** `app.py` is ~5000 lines: Flask routes, job runner, queue/dispatcher, token gate, page-view analytics, history, admin, SEO routes, and **five large inline HTML templates as Python string constants**. Do not split into modules unless explicitly asked — the user prefers the single-file layout.
 
 Important globals & locations (verify line numbers before quoting — file is actively edited):
 
@@ -54,6 +54,15 @@ If new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), keep 
 ## Admin (`/admin`)
 
 Password-gated by `YT_UI_COOKIES_PASSWORD` (503 if unset). "Load Stats" (`POST /admin/stats`) renders the page-view dashboard (stat cards, 30-day bar chart, top pages, recent views), the Installer Builds + Trial Installer Builds management cards, and download stats. Cookie upload and service-pause controls are always visible.
+
+## SEO & discoverability
+
+On-page SEO lives in the inline template heads plus a few small routes (added 2026-05-21):
+
+- **Meta tags:** the `HTML`, `_DESKTOP_TRIAL_HTML` and `_LEGAL_PAGE_TEMPLATE` heads carry `<meta description>`, canonical, Open Graph and Twitter Card tags. The legal template takes `canonical` + `meta_desc` as render vars passed from the `privacy()`/`terms()` routes. `_DESKTOP_REDEEM_HTML` is `noindex` — `/desktop/redeem` carries a token in the URL and `/desktop/update` is a utility page.
+- **Structured data:** the landing page embeds one JSON-LD `<script type="application/ld+json">` with an `@graph` of `WebSite`, `Organization`, `SoftwareApplication` (the $1.99 offer) and `FAQPage`. The `FAQPage` mirrors the on-page `<details>` FAQ — **keep the two in sync** if you edit either.
+- **Routes** (plain `Response` routes near `index()`): `/robots.txt`, `/sitemap.xml` (lists `/`, `/trial`, `/privacy`, `/terms`), and `/llms.txt` (an [llmstxt.org](https://llmstxt.org)-format brief for AI crawlers). `_SITE_ORIGIN` is the canonical origin used to build absolute URLs. `/google42d52abaf2591614.html` is the Google Search Console HTML-file token — kept as a backup only; the property is verified by DNS (a `digitaldownloads.space` **Domain** property), and the sitemap is submitted.
+- **Social image:** `static/og-image.svg` → `static/og-image.png` (1200×630 branded share card), regenerated via `sips -s format png` like the favicons.
 
 ## Running locally
 
