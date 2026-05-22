@@ -11,7 +11,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
-from flask import Flask, request, jsonify, send_from_directory, send_file, render_template_string, abort, after_this_request, make_response, redirect
+from flask import Flask, request, jsonify, send_from_directory, send_file, render_template_string, abort, after_this_request, make_response, redirect, Response
 import sys
 import zipfile
 import base64
@@ -1195,6 +1195,99 @@ HTML = r"""
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="canonical" href="https://digitaldownloads.space/">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <meta name="author" content="+downloads">
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="+downloads">
+  <meta property="og:title" content="+downloads — Save anything you can stream">
+  <meta property="og:description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more sites. Online tool or a $1.99 one-time desktop app — free updates forever, macOS, Windows and Linux.">
+  <meta property="og:url" content="https://digitaldownloads.space/">
+  <meta property="og:image" content="https://digitaldownloads.space/static/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="digital +downloads — save anything you can stream">
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="+downloads — Save anything you can stream">
+  <meta name="twitter:description" content="Download audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more. $1.99 one-time desktop app, free updates forever.">
+  <meta name="twitter:image" content="https://digitaldownloads.space/static/og-image.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "https://digitaldownloads.space/#website",
+        "url": "https://digitaldownloads.space/",
+        "name": "+downloads",
+        "description": "Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more sites.",
+        "publisher": { "@id": "https://digitaldownloads.space/#org" }
+      },
+      {
+        "@type": "Organization",
+        "@id": "https://digitaldownloads.space/#org",
+        "name": "+downloads",
+        "url": "https://digitaldownloads.space/",
+        "logo": "https://digitaldownloads.space/static/icon-512.png"
+      },
+      {
+        "@type": "SoftwareApplication",
+        "name": "+downloads for Desktop",
+        "operatingSystem": "macOS, Windows, Linux",
+        "applicationCategory": "MultimediaApplication",
+        "description": "A media downloader for YouTube, Spotify, Apple Music, SoundCloud and 1000+ more sites. Runs locally — files never pass through a server. One-time purchase, free updates forever.",
+        "url": "https://digitaldownloads.space/",
+        "downloadUrl": "https://digitaldownloads.space/desktop/buy",
+        "softwareVersion": "latest",
+        "screenshot": "https://digitaldownloads.space/static/og-image.png",
+        "offers": {
+          "@type": "Offer",
+          "price": "1.99",
+          "priceCurrency": "USD",
+          "url": "https://digitaldownloads.space/desktop/buy",
+          "availability": "https://schema.org/InStock"
+        }
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What's the difference between the online tool and the desktop app?",
+            "acceptedAnswer": { "@type": "Answer", "text": "The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $1.99 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server." }
+          },
+          {
+            "@type": "Question",
+            "name": "Are updates really free forever?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. You buy once and every future version is included — new site support, new formats, new UI. No subscriptions, no upgrade fees." }
+          },
+          {
+            "@type": "Question",
+            "name": "What happens after I buy the desktop app?",
+            "acceptedAnswer": { "@type": "Answer", "text": "The moment payment confirms, the installer for your operating system (macOS, Windows or Linux) starts downloading directly from digitaldownloads.space. No email link, no waiting room." }
+          },
+          {
+            "@type": "Question",
+            "name": "Which sites are supported?",
+            "acceptedAnswer": { "@type": "Answer", "text": "YouTube, Spotify, Apple Music, SoundCloud, Vimeo, Twitter/X, Facebook, TikTok, Twitch, Bandcamp, Mixcloud, Dailymotion, plus ~1000 others. If a site streams audio or video, there's a good chance we support it." }
+          },
+          {
+            "@type": "Question",
+            "name": "Is it legal?",
+            "acceptedAnswer": { "@type": "Answer", "text": "+downloads is a tool — what you do with it is on you. We expect downloads only for content you own, content licensed under permissive terms, or content where the source platform permits download." }
+          },
+          {
+            "@type": "Question",
+            "name": "Do you collect my data?",
+            "acceptedAnswer": { "@type": "Answer", "text": "No third-party analytics, no tracking SDKs. The desktop app runs entirely on your machine — we never see your URLs, files, or activity." }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5597587878564683"
      crossorigin="anonymous"></script>
   <style>
@@ -2492,6 +2585,15 @@ _LEGAL_PAGE_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#1a1818">
   <title>{{ page_title }} · +downloads</title>
+  <meta name="description" content="{{ meta_desc }}">
+  <link rel="canonical" href="{{ canonical }}">
+  <meta name="robots" content="index, follow">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="+downloads">
+  <meta property="og:title" content="{{ page_title }} · +downloads">
+  <meta property="og:description" content="{{ meta_desc }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta property="og:image" content="https://digitaldownloads.space/static/og-image.png">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -2711,6 +2813,7 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#1a1818">
   <title>Your purchase &middot; +downloads</title>
+  <meta name="robots" content="noindex, follow">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -2879,6 +2982,21 @@ _DESKTOP_TRIAL_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#1a1818">
   <title>Free Trial &middot; +downloads for Desktop</title>
+  <meta name="description" content="Try +downloads for Desktop free — a no-cost, YouTube-only edition of the media downloader for macOS, Windows and Linux. Upgrade any time for 1000+ supported sites.">
+  <link rel="canonical" href="https://digitaldownloads.space/trial">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="+downloads">
+  <meta property="og:title" content="Try +downloads for Desktop — free">
+  <meta property="og:description" content="A free, YouTube-only edition of the +downloads desktop app for macOS, Windows and Linux. No payment, no card — just download and go.">
+  <meta property="og:url" content="https://digitaldownloads.space/trial">
+  <meta property="og:image" content="https://digitaldownloads.space/static/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Try +downloads for Desktop — free">
+  <meta name="twitter:description" content="A free, YouTube-only edition of the +downloads desktop app for macOS, Windows and Linux.">
+  <meta name="twitter:image" content="https://digitaldownloads.space/static/og-image.png">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -4086,6 +4204,94 @@ def run_job(job_id: str):
 def index():
     return render_template_string(HTML)
 
+# ── SEO: robots + sitemap ────────────────────────────────────────────
+_SITE_ORIGIN = "https://digitaldownloads.space"
+
+@app.get("/robots.txt")
+def robots_txt():
+    body = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /admin\n"
+        "Disallow: /desktop/redeem\n"
+        "Disallow: /status/\n"
+        "Disallow: /download/\n"
+        "Disallow: /file/\n"
+        "Disallow: /job-log/\n"
+        "Disallow: /history\n"
+        "\n"
+        f"Sitemap: {_SITE_ORIGIN}/sitemap.xml\n"
+    )
+    return Response(body, mimetype="text/plain")
+
+@app.get("/sitemap.xml")
+def sitemap_xml():
+    # Public, indexable pages only — priority hints the crawler, not a ranking.
+    pages = [
+        ("/", "1.0"),
+        ("/trial", "0.8"),
+        ("/privacy", "0.3"),
+        ("/terms", "0.3"),
+    ]
+    lastmod = datetime.now().strftime("%Y-%m-%d")
+    urls = "".join(
+        f"  <url><loc>{_SITE_ORIGIN}{path}</loc>"
+        f"<lastmod>{lastmod}</lastmod>"
+        f"<priority>{prio}</priority></url>\n"
+        for path, prio in pages
+    )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{urls}"
+        "</urlset>\n"
+    )
+    return Response(xml, mimetype="application/xml")
+
+# llms.txt — a markdown summary for AI crawlers/agents (llmstxt.org proposal).
+# Plain-text, content-only; no ranking guarantees, just an accurate brief so
+# LLMs cite +downloads correctly instead of guessing.
+_LLMS_TXT = """# +downloads
+
+> +downloads is a media downloader for YouTube, Spotify, Apple Music, SoundCloud and ~1000 other sites. It is available as a metered token-based online tool and as a $1.99 one-time desktop app for macOS, Windows and Linux, with free updates forever.
+
++downloads wraps yt-dlp and ffmpeg behind a simple interface. The desktop app runs entirely on the user's machine, so files never pass through a server. A free, feature-limited (YouTube-only) trial edition of the desktop app is also offered. The product is hosted at https://digitaldownloads.space.
+
+## Products
+
+- [Desktop app](https://digitaldownloads.space/desktop/buy): $1.99 one-time purchase, free updates forever, for macOS, Windows and Linux. Unlimited downloads, runs locally.
+- [Online tool](https://digitaldownloads.space/): Browser-based downloader, metered with token-based download credits.
+- [Free trial edition](https://digitaldownloads.space/trial): A no-cost, YouTube-only edition of the desktop app. No payment or card required.
+
+## Pages
+
+- [Home](https://digitaldownloads.space/): Desktop app overview, online tool, pricing and FAQ.
+- [Free trial](https://digitaldownloads.space/trial): Download the free YouTube-only trial edition.
+- [Privacy policy](https://digitaldownloads.space/privacy): How +downloads handles data — no third-party analytics, no tracking SDKs, no IP logging.
+- [Terms of service](https://digitaldownloads.space/terms): Acceptable use and the user's responsibility for downloaded content.
+
+## Key facts
+
+- Supported sites include YouTube, Spotify, Apple Music, SoundCloud, Vimeo, Twitter/X, Facebook, TikTok, Twitch, Bandcamp, Mixcloud, Dailymotion and roughly 1000 more.
+- The desktop app costs $1.99 as a one-time purchase. There are no subscriptions and no upgrade fees; all future versions are free.
+- The desktop app has no in-app license check — payment gates obtaining the installer, not running it.
+- The desktop app downloads media locally; URLs, files and activity are never seen by the +downloads server.
+- An iOS companion app, "+ Media Player", plays a synced +downloads library and pairs with the desktop app over Wi-Fi.
+"""
+
+@app.get("/llms.txt")
+def llms_txt():
+    return Response(_LLMS_TXT, mimetype="text/plain")
+
+# Google Search Console — HTML-file ownership verification. Served at the site
+# root so the URL-prefix property https://digitaldownloads.space/ verifies.
+@app.get("/google42d52abaf2591614.html")
+def google_site_verification():
+    return Response(
+        "google-site-verification: google42d52abaf2591614.html\n",
+        mimetype="text/html",
+    )
+
 @app.get("/privacy")
 def privacy():
     return render_template_string(
@@ -4093,6 +4299,8 @@ def privacy():
         page_title="Privacy Policy",
         updated=_LEGAL_LAST_UPDATED,
         body=_PRIVACY_BODY,
+        canonical="https://digitaldownloads.space/privacy",
+        meta_desc="How +downloads handles your data: no third-party analytics, no tracking SDKs, no IP logging. The desktop app runs entirely on your machine.",
     )
 
 @app.get("/terms")
@@ -4102,6 +4310,8 @@ def terms():
         page_title="Terms of Service",
         updated=_LEGAL_LAST_UPDATED,
         body=_TERMS_BODY,
+        canonical="https://digitaldownloads.space/terms",
+        meta_desc="The terms of service for +downloads — acceptable use, your responsibility for downloaded content, and third-party platform trademark notes.",
     )
 
 @app.get("/desktop/buy")
