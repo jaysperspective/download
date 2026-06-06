@@ -1829,6 +1829,7 @@ HTML = r"""
       <button class="nav-link" onclick="document.getElementById('downloader').scrollIntoView({behavior:'smooth',block:'center'})">Online</button>
       <a href="#features">Features</a>
       <a href="#faq">FAQ</a>
+      <a href="/troubleshooting">Help</a>
       <a href="https://www.reddit.com/r/digitaldownloads_app/" target="_blank" rel="noopener noreferrer">Community</a>
       <a class="pill" href="/desktop/buy">Buy Desktop · $1.99</a>
     </nav>
