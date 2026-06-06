@@ -1584,6 +1584,55 @@ HTML = r"""
       color: #db52a6; display: inline-flex; align-items: center; gap: 4px;
     }
     .token-buy.alt .arrow { color: #9b3adb; }
+    /* Offline state: visually grayed but still clickable so the click opens
+       an explainer modal (online-tool-offline-modal). Don't use pointer-events:none —
+       we want the click. */
+    .token-buy.offline {
+      filter: grayscale(1); opacity: 0.5;
+      border-color: #2a2828; background: #1e1c1e;
+      position: relative;
+    }
+    .token-buy.offline:hover {
+      transform: none; box-shadow: none; border-color: #2a2828;
+      filter: grayscale(0.85); opacity: 0.7;
+    }
+    .token-buy.offline .arrow, .token-buy.offline .price { color: #888; }
+    .token-buy.offline .offline-pill {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(255,107,107,0.15); color: #ff6b6b;
+      font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(255,107,107,0.30);
+    }
+
+    /* Online-offline modal (shown when a grayed-out token card is clicked) */
+    .oo-overlay {
+      display: none; position: fixed; inset: 0; z-index: 2200;
+      background: rgba(0,0,0,0.78); align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    .oo-overlay.show { display: flex; }
+    .oo-card {
+      background: #1a1818; border: 1px solid #2e2c2c; border-radius: 16px;
+      padding: 32px 30px 28px; max-width: 440px; width: 100%;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.6);
+    }
+    .oo-card h2 { font-size: 20px; font-weight: 800; color: #f0eef0; margin-bottom: 10px; letter-spacing: -0.3px; }
+    .oo-card p  { font-size: 14px; color: #aaa6aa; line-height: 1.6; margin-bottom: 18px; }
+    .oo-card p strong { color: #f0eef0; }
+    .oo-actions { display: flex; flex-direction: column; gap: 10px; }
+    .oo-actions a {
+      display: block; text-align: center; padding: 13px 18px; border-radius: 11px;
+      font-size: 14px; font-weight: 700; text-decoration: none;
+    }
+    .oo-primary { background: linear-gradient(95deg,#db52a6 0%,#c44e9a 100%); color: #fff; box-shadow: 0 8px 22px rgba(219,82,166,0.28); }
+    .oo-primary:hover { background: linear-gradient(95deg,#c9479a 0%,#b34388 100%); }
+    .oo-secondary { background: #242222; border: 1px solid #353333; color: #f0eef0; }
+    .oo-secondary:hover { border-color: #bf9b3a; color: #d6b34d; }
+    .oo-dismiss {
+      display: block; width: 100%; margin-top: 14px; background: none; border: none;
+      color: #666; font-size: 12px; cursor: pointer; padding: 6px;
+    }
+    .oo-dismiss:hover { color: #aaa; }
 
     /* ── PRODUCT SECTION ──────────────────────────────────── */
     .product {
@@ -2032,8 +2081,8 @@ HTML = r"""
       <!-- Downloader card -->
       <div id="downloader" class="downloader">
         <div class="paused-banner" id="paused-banner">
-          <h2>Free Service Paused</h2>
-          <p>The free web service is no longer available. Buy a token below to use the online tool, or get the desktop app for unlimited downloads.</p>
+          <h2>Online tool temporarily offline</h2>
+          <p>We're sorting out an upstream issue with our YouTube downloader. The <strong>+downloads desktop app</strong> runs entirely on your own machine and isn't affected &mdash; try it free for 7 days, or grab the full version for $1.99.</p>
           <a class="btn-get-app" href="/desktop/buy">Get the Desktop App</a>
         </div>
 
@@ -2102,23 +2151,42 @@ HTML = r"""
         </div>
       </div>
 
-      <!-- Token purchase options under the URL box -->
+      <!-- Token purchase options under the URL box.
+           Both cards are grayed-out + click-intercepted while the online
+           downloader is hard-paused (June 2026, upstream proxy quota).
+           Restore by removing the `offline` class + onclick, and reverting
+           the section label to "Buy a token to use it online". -->
       <div class="token-buy-wrap">
-        <div class="token-buy-label">Buy a token to use it online</div>
+        <div class="token-buy-label">Online tool &mdash; temporarily offline</div>
         <div class="token-buy-grid">
-          <a class="token-buy" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">
+          <a class="token-buy offline" href="#" onclick="showOnlineOfflineModal(); return false;" aria-disabled="true">
+            <span class="offline-pill">Offline</span>
             <div class="price">$1</div>
             <div class="qty">3 downloads</div>
             <div class="sub">Delivered instantly via email. Try it once, no account needed.</div>
-            <div class="arrow">Buy 3-pack →</div>
+            <div class="arrow">Buy 3-pack &rarr;</div>
           </a>
-          <a class="token-buy alt" href="https://joshuaisaiah.art/payment/access" target="_blank" rel="noopener noreferrer">
+          <a class="token-buy alt offline" href="#" onclick="showOnlineOfflineModal(); return false;" aria-disabled="true">
+            <span class="offline-pill">Offline</span>
             <span class="tag">Best value</span>
             <div class="price">$5</div>
             <div class="qty">10 downloads</div>
             <div class="sub">Save 33% vs the 3-pack. Same instant delivery.</div>
-            <div class="arrow">Buy 10-pack →</div>
+            <div class="arrow">Buy 10-pack &rarr;</div>
           </a>
+        </div>
+      </div>
+
+      <!-- Online-offline explainer modal -->
+      <div class="oo-overlay" id="onlineOfflineOverlay" onclick="if(event.target===this) hideOnlineOfflineModal();">
+        <div class="oo-card" role="dialog" aria-labelledby="ooTitle">
+          <h2 id="ooTitle">Online tool is temporarily offline</h2>
+          <p>We're sorting out an upstream issue with our YouTube downloader. <strong>The +downloads desktop app runs entirely on your own machine</strong> &mdash; it doesn't share this limitation and works on every supported site.</p>
+          <div class="oo-actions">
+            <a class="oo-primary" href="/trial">Try +downloads free &rarr;</a>
+            <a class="oo-secondary" href="/desktop/buy">Buy +downloads &middot; $1.99</a>
+          </div>
+          <button class="oo-dismiss" onclick="hideOnlineOfflineModal()">Close</button>
         </div>
       </div>
     </div>
@@ -2164,6 +2232,17 @@ function showStatusBlock() {
 }
 function hideStatusBlock() {
   document.getElementById('statusBlock').classList.remove('active');
+}
+
+// Online-offline modal — fired by the two grayed-out token-buy cards while
+// the online downloader is hard-paused. Routes users to the desktop app.
+function showOnlineOfflineModal() {
+  const ov = document.getElementById('onlineOfflineOverlay');
+  if (ov) ov.classList.add('show');
+}
+function hideOnlineOfflineModal() {
+  const ov = document.getElementById('onlineOfflineOverlay');
+  if (ov) ov.classList.remove('show');
 }
 
 function onInsertToken() {
