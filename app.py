@@ -2864,16 +2864,6 @@ _TROUBLESHOOTING_BODY = """
   <li>Now launch your full <strong>+downloads</strong> AppImage by double-clicking it (or running it from the terminal).</li>
 </ol>
 
-<h2>"I lost my download link"</h2>
-<p>If you bought the full version and need to download it again:</p>
-<ul>
-  <li>Use the original link in your purchase confirmation email — it still works.</li>
-  <li>Or visit <a href="/desktop/update">digitaldownloads.space/desktop/update</a> — that page always serves the latest full version free to existing buyers, no purchase link needed.</li>
-</ul>
-
-<h2>"Where do my downloads go?"</h2>
-<p>By default, +downloads saves files into <strong>~/Downloads/YT</strong> on Mac and Linux, and into your Windows Downloads folder under <strong>YT</strong>. You can change this any time in the app's <strong>Instructions &amp; setup</strong> menu under "Master library folder."</p>
-
 <h2>Still stuck?</h2>
 <p>Email <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20help">digitalsov2026@gmail.com</a> with a short description of the problem and a screenshot if you can. We answer every email and we're glad to help.</p>
 """
