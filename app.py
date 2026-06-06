@@ -185,6 +185,16 @@ _TRIAL_SIGNUPS_FALLBACK = _data_dir / "trial-signups-fallback.jsonl"
 _trial_lock = threading.Lock()
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+def _load_hard_paused() -> bool:
+    # Hard pause blocks EVERYONE, including paid token holders. Used for
+    # outage-style stops (e.g. residential-proxy quota exhausted, June 2026)
+    # where serving paid users into a broken backend just queues up errors.
+    try:
+        return bool(json.loads(PAUSE_PATH.read_text()).get("hard_paused", False))
+    except Exception:
+        return False
+
+
 def _load_paused() -> bool:
     try:
         return bool(json.loads(PAUSE_PATH.read_text()).get("paused", False))
@@ -4549,6 +4559,14 @@ def start():
     data = request.get_json() or {}
     url = (data.get("url") or "").strip()
     job_type = (data.get("type") or "video").strip().lower()
+    # Hard pause blocks everyone — used during upstream outages where even
+    # paid users would just queue into broken downloads.
+    if _load_hard_paused():
+        return jsonify({
+            "error": "paused",
+            "paused": True,
+            "message": "The online downloader is temporarily offline while we sort out an upstream issue. The desktop app at digitaldownloads.space is unaffected and runs entirely on your machine."
+        }), 503
     # Token holders bypass the maintenance pause. Token comes from body or header.
     client_token = (data.get("token") or request.headers.get("X-Access-Token") or "").strip()
     paused_bypass = False
