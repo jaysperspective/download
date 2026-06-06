@@ -11,7 +11,7 @@ Important globals & locations (verify line numbers before quoting — file is ac
 - **HTML templates** (giant string constants near the top of the file):
   - `HTML` — landing page at `/`. Uses `r"""..."""` (raw string) so JS `\n` and regex backslashes survive Python parsing. The desktop product section leads the page; the online tool sits below it.
   - `ADMIN_HTML` — `/admin`. Standard `"""..."""`.
-  - `_LEGAL_PAGE_TEMPLATE` + `_PRIVACY_BODY` + `_TERMS_BODY` — `/privacy` and `/terms`.
+  - `_LEGAL_PAGE_TEMPLATE` + `_PRIVACY_BODY` + `_TERMS_BODY` + `_TROUBLESHOOTING_BODY` — `/privacy`, `/terms`, and `/troubleshooting` (all share the same dark template).
   - `_DESKTOP_REDEEM_HTML` — shared template for `/desktop/redeem` (confirmed / pending / error states) and `/desktop/update` (the `update` state).
   - `_DESKTOP_TRIAL_HTML` — `/trial`, the free-trial page. Renders an email-gate form or the OS-detected download buttons depending on the `unlocked` flag.
 - **Token gate** (~line 75–200): `_is_token_valid()` / `_consume_token()` call the payment app at `PAYMENT_APP_URL/payment/api/access/internal/token/{check,use}`, authed with `TOKEN_INTERNAL_SECRET` (`x-internal-secret` header). `_check_token_status()` is the uncached variant returning the full check JSON (`product`, `reason`). Checkout URLs: `ACCESS_PAYMENT_URL` (online), `DESKTOP_PAYMENT_URL` (desktop, defaults to `ACCESS_PAYMENT_URL?product=desktop`).
@@ -39,7 +39,7 @@ If new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), keep 
 
 ## Two products, one payment app
 
-- **Online tool** (`/`): metered, token = N download credits. Two SKUs ($1/3-downloads, $5/10-downloads), both → `https://joshuaisaiah.art/payment/access`. **The free web service is permanently paused** — the online tool now requires a purchased token (paste it into the inline Insert-Token entry).
+- **Online tool** (`/`): metered, token = N download credits. Two SKUs ($1/3-downloads, $5/10-downloads), both → `https://joshuaisaiah.art/payment/access`. **The free web service is permanently paused** — the online tool now requires a purchased token (paste it into the inline Insert-Token entry). **Currently also hard-paused for token holders** (see *Hard pause + Decodo dependency* section below) — the two `.token-buy` cards on the landing page are grayed out and click-intercepted to a desktop-app explainer modal (`showOnlineOfflineModal`), and `/start` 503s every request including paid ones.
 - **Desktop app** ($1.99 one-time, free updates forever, macOS/Windows/Linux):
   - **Buy:** landing-page Buy buttons → `/desktop/buy` → 302 → `DESKTOP_PAYMENT_URL` (payment app's `?product=desktop` checkout).
   - **Redeem:** after Stripe checkout the buyer lands on `/desktop/redeem?token=…` → Mac/Windows/Linux download buttons (UA-detected default first) → `/desktop/redeem/download` consumes one of the token's 5 credits and serves the installer. **Pay-to-download model** — no in-app license check; installers are freely shareable.
@@ -62,7 +62,7 @@ On-page SEO lives in the inline template heads plus a few small routes (added 20
 
 - **Meta tags:** the `HTML`, `_DESKTOP_TRIAL_HTML` and `_LEGAL_PAGE_TEMPLATE` heads carry `<meta description>`, canonical, Open Graph and Twitter Card tags. The legal template takes `canonical` + `meta_desc` as render vars passed from the `privacy()`/`terms()` routes. `_DESKTOP_REDEEM_HTML` is `noindex` — `/desktop/redeem` carries a token in the URL and `/desktop/update` is a utility page.
 - **Structured data:** the landing page embeds one JSON-LD `<script type="application/ld+json">` with an `@graph` of `WebSite`, `Organization`, `SoftwareApplication` (the $1.99 offer) and `FAQPage`. The `FAQPage` mirrors the on-page `<details>` FAQ — **keep the two in sync** if you edit either.
-- **Routes** (plain `Response` routes near `index()`): `/robots.txt`, `/sitemap.xml` (lists `/`, `/trial`, `/privacy`, `/terms`), and `/llms.txt` (an [llmstxt.org](https://llmstxt.org)-format brief for AI crawlers). `_SITE_ORIGIN` is the canonical origin used to build absolute URLs. `/google42d52abaf2591614.html` is the Google Search Console HTML-file token — kept as a backup only; the property is verified by DNS (a `digitaldownloads.space` **Domain** property), and the sitemap is submitted.
+- **Routes** (plain `Response` routes near `index()`): `/robots.txt`, `/sitemap.xml` (lists `/`, `/trial`, `/troubleshooting`, `/privacy`, `/terms`), and `/llms.txt` (an [llmstxt.org](https://llmstxt.org)-format brief for AI crawlers). `_SITE_ORIGIN` is the canonical origin used to build absolute URLs. `/google42d52abaf2591614.html` is the Google Search Console HTML-file token — kept as a backup only; the property is verified by DNS (a `digitaldownloads.space` **Domain** property), and the sitemap is submitted.
 - **Social image:** `static/og-image.svg` → `static/og-image.png` (1200×630 branded share card), regenerated via `sips -s format png` like the favicons.
 
 ## Running locally
@@ -87,6 +87,33 @@ Production runs in Docker via `docker-compose.yml` on a DigitalOcean droplet. **
 - The token system is the source of truth for access — don't add parallel paywall logic. Funnel new SKUs through the payment app's internal endpoints.
 - Keep the brand pink as the only saturated UI color. The gold and purple are accents.
 - Don't add a version badge or "powered by" footer. First-party page-view counting exists; don't add third-party analytics SDKs.
+
+## `/troubleshooting` page
+
+Plain-language landing spot for users hitting upgrade snags (added 2026-06-06 after the first paying customer ran into the trial→full port-collision bug). Reuses `_LEGAL_PAGE_TEMPLATE` with body `_TROUBLESHOOTING_BODY` and date `_TROUBLESHOOTING_LAST_UPDATED` (separate from `_LEGAL_LAST_UPDATED` so it can move without touching legal pages). Indexable; OG-tagged. Covers: how to tell trial vs full apart (banner + tab title), per-OS "fully quit the trial" steps (Mac dock right-click / Activity Monitor, Windows Task Manager, Linux `pkill`), and a support-email fallback. Linked from:
+- top nav (`Help` link in the homepage `<nav class="nav">`)
+- every page's footer (the `_LEGAL_PAGE_TEMPLATE` footer link, plus the duplicated footers in `HTML`, `_DESKTOP_REDEEM_HTML`, and `_DESKTOP_TRIAL_HTML`)
+- inline helper paragraphs on `/desktop/redeem` (`confirmed` state) and `/desktop/update`
+
+When updating: the v3.0.1 desktop app fixes the bug automatically, so the page frames the manual steps as "you only need these on pre-3.0.1 trial installs." Don't drop the manual steps even after that becomes ancient history — same shape of bug can come back (any cross-edition port collision, e.g. user is running an old beta) and the page is also linked from the Kit broadcast.
+
+## Hard pause + Decodo dependency
+
+The online tool only works because outbound YouTube requests are proxied through a Decodo residential-IP plan (env var `YT_UI_PROXY=http://<user>:<pass>@gate.decodo.com:10001`). Without it, YouTube bot-walls the droplet's datacenter IP on *every* yt-dlp player_client variant (web/tv_simply/mweb/ios/tv_embedded/android — all return "Sign in to confirm you're not a bot"). The proxy is therefore load-bearing for any YouTube path — including Spotify/Apple Music downloads, which match each track to a YouTube video under the hood.
+
+**Two pause flags** live in `/data/state/pause.json`:
+- `{"paused": true}` — the original "free service paused" flag. **Bypassed by valid paid tokens** at `/start` (line ~4555): token holders can still queue jobs. This has been `true` since 2026-04-17.
+- `{"hard_paused": true}` — added 2026-06-06. Blocks **everyone**, including paid token holders. `/start` returns 503 with `{"error":"paused","message":"…temporarily offline…","paused":true}`. Loaded by `_load_hard_paused()`; checked at the top of `/start` *before* the token-bypass branch. Use for upstream-outage style stops where serving paid users would just stack up errors. Currently `true` because the Decodo plan hit its 3 GB monthly cap on 2026-06-05 and started returning **HTTP 407 Proxy Authentication Required** on every request (Decodo's quota-exceeded behavior — *not* a credentials problem).
+
+**The bot-detection alert is too narrow.** `app.py:473` arms only on the literal substring `"Sign in to confirm you're not a bot"` in yt-dlp stderr. When Decodo runs out of bandwidth, the proxy 407 shows up as `Tunnel connection failed: 407 Proxy Authentication Required` — different substring, alert never fires, you find out from users instead. Worth broadening the trigger to also catch `407 Proxy Authentication Required` / `Tunnel connection failed` if/when we bring the online tool back.
+
+**Restore sequence** (once Decodo is upgraded / quota resets / a different proxy is wired in):
+1. Verify outbound via the new proxy from inside the container: `docker compose exec app curl --proxy "$YT_UI_PROXY" https://api.ipify.org` — should return an IP, not `407`.
+2. Flip `pause.json` back to `{"paused": true, "hard_paused": false}` (keeps the free tier paused, lets paid tokens through again). `_PAUSE_CACHE_TTL` is 5 s so the change takes effect within seconds; no restart needed.
+3. Restore the landing page UX: remove the `offline` class + `onclick="showOnlineOfflineModal(); return false;"` from both `<a class="token-buy">` elements, change `href="#"` back to `href="https://joshuaisaiah.art/payment/access"`, and restore the section label from `Online tool &mdash; temporarily offline` to `Buy a token to use it online`. The `paused-banner` paragraph at the top of `#downloader` should also revert from the outage-explainer copy to its prior wording.
+4. (Optional) keep the `_load_hard_paused()` mechanism and the `showOnlineOfflineModal` markup in place — they cost nothing dormant and the next outage will need them again.
+
+The "should we even keep the online YouTube tool alive" question is real: the desktop app runs on the user's residential IP and doesn't have this problem at all, so the online tool is effectively perpetual-maintenance for a marketing surface. Decision deferred 2026-06-06 — hard-paused while the user decides between renewing Decodo, moving the worker to a home machine, or retiring the online path entirely.
 
 ## Known limitations
 
