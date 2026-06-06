@@ -50,7 +50,7 @@ LOG_DIR.mkdir(exist_ok=True)
 # storage — so it stays compatible with the "no user-tracking" privacy policy.
 ANALYTICS_DB = _data_dir / "analytics.db"
 _analytics_lock = threading.Lock()
-_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/privacy", "/terms"}
+_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/privacy", "/terms", "/troubleshooting"}
 PAGEVIEW_RETENTION_DAYS = 90
 
 def _analytics_conn():
@@ -1829,6 +1829,7 @@ HTML = r"""
       <button class="nav-link" onclick="document.getElementById('downloader').scrollIntoView({behavior:'smooth',block:'center'})">Online</button>
       <a href="#features">Features</a>
       <a href="#faq">FAQ</a>
+      <a href="https://www.reddit.com/r/digitaldownloads_app/" target="_blank" rel="noopener noreferrer">Community</a>
       <a class="pill" href="/desktop/buy">Buy Desktop · $1.99</a>
     </nav>
   </header>
@@ -2135,6 +2136,8 @@ HTML = r"""
     <a href="/terms">Terms of Service</a>
     <span class="sep">·</span>
     <a href="/privacy">Privacy Policy</a>
+    <span class="sep">·</span>
+    <a href="/troubleshooting">Troubleshooting</a>
     <span class="sep">·</span>
     <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20Bug%20Report">Bug Report</a>
     <span class="sep">·</span>
@@ -2653,6 +2656,8 @@ _LEGAL_PAGE_TEMPLATE = """<!doctype html>
     <a href="/terms">Terms of Service</a>
     <span class="sep">·</span>
     <a href="/privacy">Privacy Policy</a>
+    <span class="sep">·</span>
+    <a href="/troubleshooting">Troubleshooting</a>
   </footer>
 </body>
 </html>
@@ -2805,6 +2810,73 @@ _TERMS_BODY = """
 
 _LEGAL_LAST_UPDATED = "May 21, 2026"
 
+# Troubleshooting page body. Renders inside _LEGAL_PAGE_TEMPLATE (same dark
+# header/footer chrome as /privacy and /terms). Plain-language instructions
+# aimed at users with no terminal experience — explicitly covers the
+# trial→full upgrade case that bit our first paying customer in early June
+# 2026 (the trial app stays running on port 5055, full app silently delegates
+# to it). v3.0.1 of the desktop app fixes this automatically, but anyone on a
+# pre-3.0.1 trial still has to close it once by hand.
+_TROUBLESHOOTING_LAST_UPDATED = "June 6, 2026"
+_TROUBLESHOOTING_BODY = """
+<div class="callout">
+  <strong>Quick fix:</strong> if you bought the full version but your browser still shows the trial, the trial app is still running in the background. Closing it fully (instructions below) lets the full app take over. The latest +downloads (v3.0.1, June 2026) handles this automatically — these steps are for older installs.
+</div>
+
+<h2>"I bought the full version but it still shows the trial"</h2>
+<p>This almost always means the free trial app is still running quietly in the background. Both apps use the same address inside your computer to talk to your browser, so until the trial steps out of the way, your browser keeps showing it. The fix takes about 30 seconds.</p>
+
+<h3>How can I tell which one I'm looking at?</h3>
+<ul>
+  <li>The <strong>trial</strong> version has a pink banner across the top of the page that says <strong>TRIAL EDITION</strong>. The browser tab title says <em>+downloads · Trial Edition</em>.</li>
+  <li>The <strong>full</strong> version has no banner. The browser tab title is just <em>+downloads</em>.</li>
+</ul>
+
+<h2>Mac &mdash; how to close the trial</h2>
+<ol>
+  <li>Look at your <strong>Dock</strong> (the row of icons at the bottom of your screen). Find the icon labeled <strong>+downloads Trial</strong>.</li>
+  <li><strong>Right-click</strong> it (or hold the <strong>Control</strong> key and click).</li>
+  <li>Choose <strong>Quit</strong> from the menu that appears.</li>
+  <li>Now open the regular <strong>+downloads</strong> app from your Applications folder — your browser will open onto the full version.</li>
+</ol>
+<div class="callout"><strong>Important:</strong> just closing the browser tab does <em>not</em> quit the app. You have to use <strong>Quit</strong> from the Dock menu.</div>
+<p><strong>If the +downloads Trial icon isn't in the Dock:</strong></p>
+<ol>
+  <li>Press <strong>Command + Space</strong>, type <strong>Activity Monitor</strong>, hit Return.</li>
+  <li>In the search box at the top right, type <strong>+downloads Trial</strong>.</li>
+  <li>Click the row that appears, then click the small <strong>X</strong> button at the top-left of the Activity Monitor window and choose <strong>Quit</strong>.</li>
+</ol>
+
+<h2>Windows &mdash; how to close the trial</h2>
+<ol>
+  <li>Press <strong>Ctrl + Shift + Esc</strong> at the same time to open <strong>Task Manager</strong>.</li>
+  <li>If you see a small window, click <strong>More details</strong> at the bottom to expand it.</li>
+  <li>In the <strong>Processes</strong> tab, scroll down to find <strong>+downloads Trial</strong>.</li>
+  <li>Click that row, then click <strong>End task</strong> in the bottom-right corner.</li>
+  <li>Now double-click your <strong>+downloads</strong> shortcut (Desktop or Start menu) to launch the full version.</li>
+</ol>
+
+<h2>Linux &mdash; how to close the trial</h2>
+<ol>
+  <li>Open a Terminal window.</li>
+  <li>Type the following and press Enter:<br><code>pkill -f '+downloads Trial'</code></li>
+  <li>Now launch your full <strong>+downloads</strong> AppImage by double-clicking it (or running it from the terminal).</li>
+</ol>
+
+<h2>"I lost my download link"</h2>
+<p>If you bought the full version and need to download it again:</p>
+<ul>
+  <li>Use the original link in your purchase confirmation email — it still works.</li>
+  <li>Or visit <a href="/desktop/update">digitaldownloads.space/desktop/update</a> — that page always serves the latest full version free to existing buyers, no purchase link needed.</li>
+</ul>
+
+<h2>"Where do my downloads go?"</h2>
+<p>By default, +downloads saves files into <strong>~/Downloads/YT</strong> on Mac and Linux, and into your Windows Downloads folder under <strong>YT</strong>. You can change this any time in the app's <strong>Instructions &amp; setup</strong> menu under "Master library folder."</p>
+
+<h2>Still stuck?</h2>
+<p>Email <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20help">digitalsov2026@gmail.com</a> with a short description of the problem and a screenshot if you can. We answer every email and we're glad to help.</p>
+"""
+
 
 _DESKTOP_REDEEM_HTML = """<!doctype html>
 <html lang="en">
@@ -2899,6 +2971,7 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
       {% endfor %}
     </div>
     <p class="helper">Your purchase works on every platform &mdash; bookmark this link to grab the others or re-download later. The link is also in your confirmation email.</p>
+    <p class="helper">Already had the free trial installed? Quit it before opening the full app &mdash; see our <a href="/troubleshooting">quick troubleshooting guide</a>.</p>
     {% else %}
     <p class="sub">Thanks for buying <strong>+downloads for Desktop</strong>. Your installer download link has been emailed to you &mdash; check your inbox (and your spam folder, just in case).</p>
     <p class="helper">Didn't get the email within a few minutes? <a href="mailto:digitalsov2026@gmail.com?subject=Desktop%20installer%20link">Contact support</a> and we'll resend your download link.</p>
@@ -2919,6 +2992,7 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
       {% endfor %}
     </div>
     <p class="helper">Free updates forever &mdash; bookmark this link or watch your inbox when a new version ships.</p>
+    <p class="helper">Trouble installing or switching from the trial? See our <a href="/troubleshooting">troubleshooting guide</a>.</p>
     {% else %}
     <p class="sub">No builds are available right now &mdash; please check back shortly.</p>
     {% endif %}
@@ -2941,6 +3015,8 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
     <a href="/terms">Terms of Service</a>
     <span class="sep">&middot;</span>
     <a href="/privacy">Privacy Policy</a>
+    <span class="sep">&middot;</span>
+    <a href="/troubleshooting">Troubleshooting</a>
   </footer>
   {% if state == 'pending' %}
   <script>
@@ -3149,6 +3225,8 @@ _DESKTOP_TRIAL_HTML = """<!doctype html>
     <a href="/terms">Terms of Service</a>
     <span class="sep">&middot;</span>
     <a href="/privacy">Privacy Policy</a>
+    <span class="sep">&middot;</span>
+    <a href="/troubleshooting">Troubleshooting</a>
   </footer>
 </body>
 </html>
@@ -4230,6 +4308,7 @@ def sitemap_xml():
     pages = [
         ("/", "1.0"),
         ("/trial", "0.8"),
+        ("/troubleshooting", "0.5"),
         ("/privacy", "0.3"),
         ("/terms", "0.3"),
     ]
@@ -4312,6 +4391,17 @@ def terms():
         body=_TERMS_BODY,
         canonical="https://digitaldownloads.space/terms",
         meta_desc="The terms of service for +downloads — acceptable use, your responsibility for downloaded content, and third-party platform trademark notes.",
+    )
+
+@app.get("/troubleshooting")
+def troubleshooting():
+    return render_template_string(
+        _LEGAL_PAGE_TEMPLATE,
+        page_title="Troubleshooting",
+        updated=_TROUBLESHOOTING_LAST_UPDATED,
+        body=_TROUBLESHOOTING_BODY,
+        canonical="https://digitaldownloads.space/troubleshooting",
+        meta_desc="How to switch from the free trial of +downloads to the full version, what to do if you lost your download link, and where to find your downloaded files. Plain-language steps for Mac, Windows and Linux.",
     )
 
 @app.get("/desktop/buy")
