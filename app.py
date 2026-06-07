@@ -2907,7 +2907,7 @@ _LEGAL_LAST_UPDATED = "May 21, 2026"
 # 2026 (the trial app stays running on port 5055, full app silently delegates
 # to it). v3.0.1 of the desktop app fixes this automatically, but anyone on a
 # pre-3.0.1 trial still has to close it once by hand.
-_TROUBLESHOOTING_LAST_UPDATED = "June 6, 2026"
+_TROUBLESHOOTING_LAST_UPDATED = "June 7, 2026"
 _TROUBLESHOOTING_BODY = """
 <div class="callout">
   <strong>Quick fix:</strong> if you bought the full version but your browser still shows the trial, the trial app is still running in the background. Closing it fully (instructions below) lets the full app take over. The latest +downloads (v3.0.1, June 2026) handles this automatically — these steps are for older installs.
@@ -2952,6 +2952,19 @@ _TROUBLESHOOTING_BODY = """
   <li>Type the following and press Enter:<br><code>pkill -f '+downloads Trial'</code></li>
   <li>Now launch your full <strong>+downloads</strong> AppImage by double-clicking it (or running it from the terminal).</li>
 </ol>
+
+<h2>Mac &mdash; "security wants to use your confidential information stored in Chrome Safe Storage"</h2>
+<p>The first time you start a download on a Mac, macOS may pop a system password prompt that says something like:</p>
+<blockquote style="border-left:3px solid #2e2c2c;padding:8px 14px;margin:10px 0;color:#c8c4c8;font-size:14px;">&ldquo;security&rdquo; wants to use your confidential information stored in &ldquo;Chrome Safe Storage&rdquo; in your keychain.</blockquote>
+<p>This prompt is legitimate &mdash; it's coming from macOS itself, not from a website or anything malicious. <strong>&ldquo;security&rdquo; is the name of Apple's built-in keychain command-line tool</strong> (<code>/usr/bin/security</code>), which ships with every Mac. It is not a sketchy app name.</p>
+<p>Here's what's happening: when +downloads runs a download, it reads cookies from your installed browser so it can grab things that require you to be logged in &mdash; your own SoundCloud Go+ tracks, age-gated YouTube videos, members-only content, etc. On macOS, Chrome encrypts its cookies with a key stored in your login keychain under &ldquo;Chrome Safe Storage&rdquo;. To read that key, +downloads asks Apple's <code>security</code> tool, and macOS pops the prompt to ask your permission.</p>
+<p>You have three options on that prompt &mdash; any of them is fine:</p>
+<ul>
+  <li><strong>Allow</strong> &mdash; grants access for that one download.</li>
+  <li><strong>Always Allow</strong> &mdash; grants it permanently for +downloads so you never see the prompt again. Recommended if you plan to use the app regularly.</li>
+  <li><strong>Deny</strong> &mdash; also fine. Public YouTube videos will still work. Downloads that need a Chrome login (SoundCloud Go+, YouTube age-gated, etc.) may fail.</li>
+</ul>
+<p>Nothing is uploaded, exfiltrated, or sent off your machine. The cookies are used locally on disk for that download and that's it. +downloads is a fully local app &mdash; the only network traffic it makes is to the sites you're downloading from.</p>
 
 <h2>Still stuck?</h2>
 <p>Email <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20help">digitalsov2026@gmail.com</a> with a short description of the problem and a screenshot if you can. We answer every email and we're glad to help.</p>
@@ -4481,7 +4494,7 @@ def troubleshooting():
         updated=_TROUBLESHOOTING_LAST_UPDATED,
         body=_TROUBLESHOOTING_BODY,
         canonical="https://digitaldownloads.space/troubleshooting",
-        meta_desc="How to switch from the free trial of +downloads to the full version, what to do if you lost your download link, and where to find your downloaded files. Plain-language steps for Mac, Windows and Linux.",
+        meta_desc="Help with +downloads: switching from the free trial to the full version, the macOS keychain &ldquo;security&rdquo; prompt about Chrome Safe Storage, and other common questions. Plain-language steps for Mac, Windows and Linux.",
     )
 
 @app.get("/desktop/buy")
