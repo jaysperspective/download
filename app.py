@@ -1,4 +1,5 @@
 import hmac
+import html
 import json
 import os
 import subprocess
@@ -50,7 +51,7 @@ LOG_DIR.mkdir(exist_ok=True)
 # storage — so it stays compatible with the "no user-tracking" privacy policy.
 ANALYTICS_DB = _data_dir / "analytics.db"
 _analytics_lock = threading.Lock()
-_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/privacy", "/terms", "/troubleshooting"}
+_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/review", "/privacy", "/terms", "/troubleshooting"}
 PAGEVIEW_RETENTION_DAYS = 90
 
 def _analytics_conn():
@@ -66,6 +67,112 @@ def _init_analytics_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pageviews_created ON pageviews(created_at)")
 
 _init_analytics_db()
+
+# Customer reviews — a SEPARATE db file so the 90-day pageview prune never touches
+# them. Reviews are admin-moderated: nothing is shown publicly until approved.
+REVIEWS_DB = _data_dir / "reviews.db"
+_reviews_lock = threading.Lock()
+
+def _reviews_conn():
+    return sqlite3.connect(REVIEWS_DB, timeout=5)
+
+def _init_reviews_db():
+    with _reviews_lock, _reviews_conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS reviews ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "rating INTEGER NOT NULL, name TEXT, body TEXT, source TEXT, "
+            "status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status)")
+
+_init_reviews_db()
+
+def add_review(rating: int, name: str, body: str, source: str = "") -> bool:
+    try:
+        with _reviews_lock, _reviews_conn() as conn:
+            conn.execute(
+                "INSERT INTO reviews (rating, name, body, source, status, created_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                (rating, name, body, source, int(time.time())),
+            )
+        return True
+    except Exception:
+        return False
+
+def _reviews_by_status(status: str, limit: int = 200) -> list:
+    try:
+        conn = _reviews_conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, rating, name, body, source, status, created_at "
+                "FROM reviews WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {"id": r[0], "rating": r[1], "name": r[2], "body": r[3],
+             "source": r[4], "status": r[5], "created_at": r[6]}
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+def approved_reviews(limit: int = 200) -> list:
+    return _reviews_by_status("approved", limit)
+
+def pending_reviews(limit: int = 200) -> list:
+    return _reviews_by_status("pending", limit)
+
+def review_aggregate() -> dict:
+    """Count + average over APPROVED reviews only — drives the landing-page stars."""
+    out = {"count": 0, "avg": 0.0}
+    try:
+        conn = _reviews_conn()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), AVG(rating) FROM reviews WHERE status = 'approved'"
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            out["count"] = int(row[0])
+            out["avg"] = round(float(row[1]), 1)
+    except Exception:
+        pass
+    return out
+
+def set_review_status(review_id: int, status: str) -> bool:
+    if status not in ("pending", "approved", "denied"):
+        return False
+    try:
+        with _reviews_lock, _reviews_conn() as conn:
+            conn.execute("UPDATE reviews SET status = ? WHERE id = ?", (status, review_id))
+        return True
+    except Exception:
+        return False
+
+def _stars(rating) -> str:
+    r = max(0, min(5, int(rating or 0)))
+    return "★" * r + "☆" * (5 - r)
+
+def _render_reviews_html(reviews: list) -> str:
+    """Build the approved-review cards as pre-escaped HTML (user-generated content,
+    so escape here and inject with |safe — autoescaping is on for render_template_string)."""
+    cards = []
+    for rv in reviews:
+        name = html.escape((rv.get("name") or "").strip() or "Anonymous")
+        body = html.escape((rv.get("body") or "").strip())
+        body_html = f'<p class="review-body">{body}</p>' if body else ''
+        cards.append(
+            '<div class="review-card">'
+            f'<div class="review-stars">{_stars(rv.get("rating"))}</div>'
+            f'{body_html}'
+            f'<div class="review-name">{name}</div>'
+            '</div>'
+        )
+    return "".join(cards)
 
 def _record_pageview(path: str):
     try:
@@ -519,6 +626,30 @@ def _check_cookie_alert(log_output: str):
         pass
 
 
+def _send_review_alert(rating, name, body):
+    """Email a heads-up when a new review needs moderation, so the admin doesn't
+    have to poll /admin. Reuses the cookie-alert SMTP config; no-ops if unset.
+    Fired on a background thread so it never slows the form submit."""
+    if not SMTP_USER or not SMTP_PASS or not ALERT_EMAIL:
+        return
+    try:
+        msg = MIMEText(
+            "A new +downloads review is awaiting approval.\n\n"
+            f"Rating: {rating}/5\n"
+            f"Name:   {name or 'Anonymous'}\n"
+            f"Review: {(body or '(no text)')[:1000]}\n\n"
+            "Approve or hide it at https://digitaldownloads.space/admin (Reviews section)."
+        )
+        msg["Subject"] = f"[+downloads] New review ({rating}★) awaiting approval"
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_EMAIL
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.send_message(msg)
+    except Exception:
+        pass
+
+
 def _is_safe_path(path: str) -> bool:
     try:
         return os.path.realpath(path).startswith(os.path.realpath(DOWNLOAD_DIR))
@@ -592,6 +723,20 @@ ADMIN_HTML = """
     }
     .ok  { color: #4caf7d; }
     .err { color: #e05c5c; }
+
+    /* Reviews moderation */
+    .rev-row { padding: 13px 0; border-bottom: 1px solid #222; }
+    .rev-row:last-child { border-bottom: none; }
+    .rev-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .rev-stars { color: #bf9b3a; letter-spacing: 1px; }
+    .rev-name { font-weight: 700; font-size: 13px; }
+    .rev-src { font-size: 11px; color: #777; background: #222; padding: 1px 7px; border-radius: 8px; }
+    .rev-time { font-size: 11px; color: #666; margin-left: auto; }
+    .rev-body { font-size: 13px; color: #cfc8ce; line-height: 1.5; margin: 7px 0 0; white-space: pre-wrap; }
+    .rev-actions { margin-top: 9px; display: flex; gap: 8px; }
+    .rev-btn { border: none; border-radius: 7px; padding: 5px 14px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .rev-btn.ok { background: #1f5d3a; color: #cdebd8; }
+    .rev-btn.no { background: #2a2222; color: #e0a0a0; border: 1px solid #3a2a2a; }
 
     /* Summary cards */
     .stat-grid {
@@ -807,6 +952,17 @@ ADMIN_HTML = """
         <div id="build-msg-trial"></div>
       </div>
 
+      <div class="section-head">Reviews</div>
+      <div class="card">
+        <div class="card-title">Pending <span id="reviews-summary" style="color:#888; font-weight:400; font-size:12px;"></span></div>
+        <div id="reviews-pending"></div>
+        <div id="review-msg"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Approved (live on the site)</div>
+        <div id="reviews-approved"></div>
+      </div>
+
       <div class="section-head">Page Views</div>
       <div class="stat-grid" id="pv-grid"></div>
       <div class="card">
@@ -985,6 +1141,7 @@ ADMIN_HTML = """
       document.getElementById('stats-section').style.display = 'block';
       renderPageviews(d.pageviews);
       renderBuilds(d.builds, d.trial_builds);
+      renderReviews(d.pending_reviews, d.approved_reviews, d.review_aggregate);
 
       // Summary cards
       const total    = d.total_history;
@@ -1166,6 +1323,51 @@ ADMIN_HTML = """
       } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
     }
 
+    function starStr(n) { n = Math.max(0, Math.min(5, n|0)); return '★'.repeat(n) + '☆'.repeat(5 - n); }
+
+    function renderReviews(pending, approved, agg) {
+      pending = pending || []; approved = approved || [];
+      var sum = document.getElementById('reviews-summary');
+      if (sum) sum.textContent = (agg && agg.count) ? ('— ' + agg.avg + '★ avg · ' + agg.count + ' approved') : '';
+      function row(r, approvedView) {
+        return '<div class="rev-row">'
+          + '<div class="rev-head"><span class="rev-stars">' + starStr(r.rating) + '</span>'
+          + '<span class="rev-name">' + escHtml(r.name || 'Anonymous') + '</span>'
+          + (r.source ? '<span class="rev-src">' + escHtml(r.source) + '</span>' : '')
+          + '<span class="rev-time">' + relTimeTs(r.created_at) + '</span></div>'
+          + (r.body ? '<div class="rev-body">' + escHtml(r.body) + '</div>' : '')
+          + '<div class="rev-actions">'
+          + (approvedView ? '' : '<button class="rev-btn ok" onclick="approveReview(' + r.id + ')">Approve</button>')
+          + '<button class="rev-btn no" onclick="denyReview(' + r.id + ')">' + (approvedView ? 'Hide' : 'Deny') + '</button>'
+          + '</div></div>';
+      }
+      document.getElementById('reviews-pending').innerHTML =
+        pending.length ? pending.map(function(r){ return row(r, false); }).join('')
+                       : '<div style="color:#555;padding:12px 0">No pending reviews.</div>';
+      document.getElementById('reviews-approved').innerHTML =
+        approved.length ? approved.map(function(r){ return row(r, true); }).join('')
+                        : '<div style="color:#555;padding:12px 0">No approved reviews yet.</div>';
+    }
+
+    async function approveReview(id) { return _reviewAction(id, 'approve'); }
+    async function denyReview(id) { return _reviewAction(id, 'deny'); }
+    async function _reviewAction(id, action) {
+      var msg = document.getElementById('review-msg');
+      if (!pw()) { msg.textContent = 'Enter password first.'; msg.className = 'err'; return; }
+      msg.textContent = 'Working…'; msg.className = '';
+      try {
+        var r = await fetch('/admin/review/' + id + '/' + action, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw() })
+        });
+        var j = await r.json();
+        if (!r.ok) { msg.textContent = j.error || 'Action failed.'; msg.className = 'err'; return; }
+        msg.textContent = (action === 'approve' ? 'Approved — now live on the site.' : 'Hidden.'); msg.className = 'ok';
+        loadStats();
+      } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
+    }
+
     async function deleteBuild(os, edition) {
       edition = edition || 'full';
       var msg = document.getElementById(edition === 'trial' ? 'build-msg-trial' : 'build-msg');
@@ -1258,7 +1460,14 @@ HTML = r"""
           "priceCurrency": "USD",
           "url": "https://digitaldownloads.space/desktop/buy",
           "availability": "https://schema.org/InStock"
-        }
+        }{% if review_count %},
+        "aggregateRating": {
+          "@type": "AggregateRating",
+          "ratingValue": "{{ avg_rating }}",
+          "reviewCount": "{{ review_count }}",
+          "bestRating": "5",
+          "worstRating": "1"
+        }{% endif %}
       },
       {
         "@type": "FAQPage",
@@ -1666,6 +1875,44 @@ HTML = r"""
     }
     .trust-row .trust { display: inline-flex; align-items: center; gap: 6px; }
     .trust-row .trust svg { color: #48c78e; }
+    .rating-summary {
+      display: inline-flex; align-items: center; gap: 9px; margin-top: 16px;
+      text-decoration: none; color: #c9c2c8; font-size: 14px;
+    }
+    .rating-summary .rs-stars { color: #bf9b3a; font-size: 17px; letter-spacing: 1px; }
+    .rating-summary:hover .rs-text { color: #f0eef0; }
+    /* Reviews section */
+    .reviews { margin: 0 0 64px; }
+    .reviews-frame {
+      position: relative; border: 1px solid #2e2c2c; border-radius: 18px;
+      padding: 46px 38px 40px; text-align: center;
+      background: linear-gradient(180deg, rgba(219,82,166,0.05), rgba(191,155,58,0.02) 60%, rgba(0,0,0,0));
+    }
+    .rf-corner { position: absolute; width: 24px; height: 24px; border: 2px solid #bf9b3a; pointer-events: none; }
+    .rf-corner.tl { top: -1px; left: -1px; border-right: none; border-bottom: none; border-top-left-radius: 18px; }
+    .rf-corner.tr { top: -1px; right: -1px; border-left: none; border-bottom: none; border-top-right-radius: 18px; }
+    .rf-corner.bl { bottom: -1px; left: -1px; border-right: none; border-top: none; border-bottom-left-radius: 18px; }
+    .rf-corner.br { bottom: -1px; right: -1px; border-left: none; border-top: none; border-bottom-right-radius: 18px; }
+    .reviews-eyebrow {
+      display: inline-block; font-size: 12px; font-weight: 700; color: #bf9b3a;
+      letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;
+    }
+    .reviews-title { font-size: 26px; margin: 0 0 26px; }
+    .reviews-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; text-align: left;
+    }
+    .review-card {
+      background: #242222; border: 1px solid #2e2c2c; border-radius: 14px; padding: 20px;
+    }
+    .review-stars { color: #bf9b3a; font-size: 15px; letter-spacing: 1px; margin-bottom: 10px; }
+    .review-body { font-size: 14px; color: #cfc8ce; line-height: 1.55; margin: 0 0 12px; }
+    .review-name { font-size: 13px; color: #8a828a; font-weight: 600; }
+    .reviews-cta {
+      display: inline-block; margin-top: 26px; color: #db52a6; text-decoration: none;
+      font-size: 14px; font-weight: 600;
+    }
+    .reviews-cta:hover { text-decoration: underline; }
+    @media (max-width: 720px) { .reviews-grid { grid-template-columns: 1fr; } }
     .trial-cta { margin-top: 16px; }
     .btn-trial {
       display: inline-flex; align-items: center; gap: 10px;
@@ -1912,6 +2159,12 @@ HTML = r"""
           <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>macOS, Windows &amp; Linux</span>
           <span class="trust"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Auto-download after checkout</span>
         </div>
+        {% if review_count %}
+        <a class="rating-summary" href="/review" title="Read &amp; leave reviews">
+          <span class="rs-stars">{{ avg_stars }}</span>
+          <span class="rs-text">{{ avg_rating }} &middot; {{ review_count }} review{{ 's' if review_count != 1 else '' }}</span>
+        </a>
+        {% endif %}
         <div class="trial-cta">
           <a class="btn-trial" href="/trial">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -1974,6 +2227,19 @@ HTML = r"""
           <p>One purchase, every future version. New site support, new formats, new features — all included.</p>
         </div>
       </div>
+
+      {% if reviews_html %}
+      <div class="reviews">
+        <div class="reviews-frame">
+          <span class="rf-corner tl"></span><span class="rf-corner tr"></span>
+          <span class="rf-corner bl"></span><span class="rf-corner br"></span>
+          <span class="reviews-eyebrow">★ {{ avg_rating }} from {{ review_count }} review{{ 's' if review_count != 1 else '' }}</span>
+          <h2 class="reviews-title">What people are saying</h2>
+          <div class="reviews-grid">{{ reviews_html|safe }}</div>
+          <a class="reviews-cta" href="/review">★ Leave a review</a>
+        </div>
+      </div>
+      {% endif %}
 
       <!-- Supported sites -->
       <div class="sites">
@@ -4373,7 +4639,16 @@ def run_job(job_id: str):
 
 @app.get("/")
 def index():
-    return render_template_string(HTML)
+    agg = review_aggregate()
+    cnt, avg = agg["count"], agg["avg"]
+    filled = int(round(avg)) if cnt else 0
+    return render_template_string(
+        HTML,
+        review_count=cnt,
+        avg_rating=avg,
+        avg_stars=("★" * filled + "☆" * (5 - filled)),
+        reviews_html=_render_reviews_html(approved_reviews(limit=24)),
+    )
 
 # ── SEO: robots + sitemap ────────────────────────────────────────────
 _SITE_ORIGIN = "https://digitaldownloads.space"
@@ -4401,6 +4676,7 @@ def sitemap_xml():
     pages = [
         ("/", "1.0"),
         ("/trial", "0.8"),
+        ("/review", "0.6"),
         ("/troubleshooting", "0.5"),
         ("/privacy", "0.3"),
         ("/terms", "0.3"),
@@ -4644,6 +4920,125 @@ def desktop_trial_unlock():
         max_age=180 * 24 * 3600, httponly=True, samesite="Lax",
     )
     return resp
+
+
+# ── Customer reviews ─────────────────────────────────────────────────
+_REVIEW_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leave a review &middot; +downloads</title>
+<meta name="robots" content="index,follow">
+<meta name="description" content="Share your experience with +downloads — the $1.99 one-time media downloader for macOS, Windows and Linux.">
+<link rel="canonical" href="https://digitaldownloads.space/review">
+<link rel="icon" href="/static/favicon.svg">
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; background:#1a1818; color:#f0eef0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:560px; margin:0 auto; padding:40px 20px 60px; }
+  .logo { display:inline-block; font-size:20px; font-weight:800; text-decoration:none; color:#db52a6; margin-bottom:28px; }
+  .logo .lo-prefix { color:#f0eef0; }
+  h1 { font-size:24px; margin:0 0 8px; }
+  .sub { color:#9a9298; font-size:14px; margin:0 0 26px; line-height:1.5; }
+  .card { background:#242222; border:1px solid #2e2c2c; border-radius:16px; padding:26px 24px; }
+  label.fl { display:block; font-size:13px; color:#c9c2c8; margin:0 0 7px; font-weight:600; }
+  input[type=text], textarea {
+    width:100%; background:#1a1818; border:1.5px solid #353333; color:#f0eef0;
+    padding:11px 13px; border-radius:9px; font-size:14px; outline:none; font-family:inherit;
+  }
+  input[type=text]:focus, textarea:focus { border-color:#db52a6; }
+  textarea { resize:vertical; min-height:96px; line-height:1.5; }
+  .field { margin-bottom:18px; }
+  .stars { display:inline-flex; flex-direction:row-reverse; }
+  .stars input { display:none; }
+  .stars label { font-size:36px; color:#3a3636; cursor:pointer; padding:0 3px; transition:color 0.12s; }
+  .stars label:hover, .stars label:hover ~ label, .stars input:checked ~ label { color:#bf9b3a; }
+  .btn { background:#db52a6; color:#fff; border:none; padding:12px 26px; border-radius:10px;
+    font-size:15px; font-weight:700; cursor:pointer; }
+  .btn:hover { background:#c9479a; }
+  .err { color:#ff6b6b; font-size:13px; margin:0 0 16px; }
+  .thanks { text-align:center; padding:14px 0; }
+  .thanks .big { font-size:46px; color:#bf9b3a; }
+  .note { color:#6f686e; font-size:12px; margin:18px 0 0; line-height:1.5; }
+  .back { display:inline-block; margin-top:22px; color:#db52a6; text-decoration:none; font-size:14px; }
+  .hp { position:absolute; left:-9999px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
+    {% if thanks %}
+    <div class="card thanks">
+      <div class="big">★</div>
+      <h1>Thank you!</h1>
+      <p class="sub">Your review was submitted and will appear on the site once it's approved. We read every one.</p>
+      <a class="back" href="/">&larr; Back to +downloads</a>
+    </div>
+    {% else %}
+    <h1>Leave a review</h1>
+    <p class="sub">Enjoying +downloads? Tell other people what you think — a sentence or two is plenty.</p>
+    <div class="card">
+      {% if error %}<p class="err">Please pick a star rating (1–5) before submitting.</p>{% endif %}
+      <form method="post" action="/review">
+        <input type="hidden" name="ref" value="{{ ref }}">
+        <input type="text" class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <div class="field">
+          <label class="fl">Your rating</label>
+          <div class="stars">
+            <input type="radio" id="s5" name="rating" value="5" required><label for="s5" title="5 stars">★</label>
+            <input type="radio" id="s4" name="rating" value="4"><label for="s4" title="4 stars">★</label>
+            <input type="radio" id="s3" name="rating" value="3"><label for="s3" title="3 stars">★</label>
+            <input type="radio" id="s2" name="rating" value="2"><label for="s2" title="2 stars">★</label>
+            <input type="radio" id="s1" name="rating" value="1"><label for="s1" title="1 star">★</label>
+          </div>
+        </div>
+        <div class="field">
+          <label class="fl" for="rvname">Your name <span style="color:#6f686e; font-weight:400;">(optional)</span></label>
+          <input type="text" id="rvname" name="name" maxlength="60" placeholder="Anonymous" autocomplete="name">
+        </div>
+        <div class="field">
+          <label class="fl" for="rvbody">Your review <span style="color:#6f686e; font-weight:400;">(optional)</span></label>
+          <textarea id="rvbody" name="body" maxlength="1500" placeholder="What do you use +downloads for? What works well?"></textarea>
+        </div>
+        <button class="btn" type="submit">Submit review</button>
+      </form>
+      <p class="note">Reviews are moderated before they appear on the site. We don't store your IP or set tracking cookies.</p>
+    </div>
+    <a class="back" href="/">&larr; Back to +downloads</a>
+    {% endif %}
+  </div>
+</body>
+</html>"""
+
+
+@app.get("/review")
+def review_page():
+    return render_template_string(
+        _REVIEW_HTML,
+        thanks=request.args.get("thanks") == "1",
+        error=request.args.get("e") == "1",
+        ref=(request.args.get("ref") or "")[:40],
+    )
+
+
+@app.post("/review")
+def review_submit():
+    # Honeypot: bots fill the hidden "website" field, humans never see it.
+    if (request.form.get("website") or "").strip():
+        return redirect("/review?thanks=1")
+    try:
+        rating = int(request.form.get("rating") or 0)
+    except ValueError:
+        rating = 0
+    if rating < 1 or rating > 5:
+        return redirect("/review?e=1")
+    name = (request.form.get("name") or "").strip()[:60]
+    body = (request.form.get("body") or "").strip()[:1500]
+    source = (request.form.get("ref") or "").strip()[:40]
+    add_review(rating, name, body, source)
+    threading.Thread(target=_send_review_alert, args=(rating, name, body), daemon=True).start()
+    return redirect("/review?thanks=1")
 
 
 @app.post("/start")
@@ -5035,6 +5430,9 @@ def admin_stats():
         "pageviews": _pageview_analytics(),
         "builds": _list_desktop_builds(),
         "trial_builds": _list_desktop_builds(DESKTOP_BUILDS_TRIAL_DIR),
+        "pending_reviews": pending_reviews(),
+        "approved_reviews": approved_reviews(),
+        "review_aggregate": review_aggregate(),
     })
 
 
@@ -5125,6 +5523,23 @@ def admin_pause():
         _pause_cache_at = time.time()
     _save_paused(new_val)
     return jsonify({"ok": True, "paused": new_val})
+
+
+@app.post("/admin/review/<int:review_id>/<action>")
+def admin_review_action(review_id, action):
+    """Moderate a customer review. action ∈ approve | deny. Approved reviews show
+    on the landing page; denied ones are hidden but kept for the record."""
+    if not COOKIES_PASSWORD:
+        abort(503)
+    data = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    status = {"approve": "approved", "deny": "denied"}.get(action)
+    if not status:
+        return jsonify({"error": "Unknown action"}), 400
+    if not set_review_status(review_id, status):
+        return jsonify({"error": "Update failed"}), 500
+    return jsonify({"ok": True, "status": status})
 
 
 @app.before_request
