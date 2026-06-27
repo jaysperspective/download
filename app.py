@@ -849,17 +849,22 @@ ADMIN_HTML = """
     <h1>+downloads admin</h1>
 
     <div class="card">
-      <div class="card-title">Upload Cookies</div>
+      <div class="card-title">Admin</div>
       <label for="pw">Password</label>
       <input type="password" id="pw" placeholder="YT_UI_COOKIES_PASSWORD">
-      <label for="cfile">cookies.txt</label>
-      <input type="file" id="cfile" accept=".txt">
       <div class="btn-row">
-        <button class="btn" id="upload-btn" onclick="uploadCookies()">Upload</button>
-        <button class="btn-outline" onclick="loadStats()">Load Stats</button>
-        <button class="btn-outline" onclick="clearHistory()" style="border-color:#e74c3c;color:#e74c3c">Clear History</button>
+        <button class="btn" onclick="loadStats()">Load Stats</button>
       </div>
-      <div id="upload-msg"></div>
+      <div style="border-top:1px solid #2e2c2c;margin:20px 0 16px"></div>
+      <label for="cfile" style="margin-top:0">cookies.txt</label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input type="file" id="cfile" accept=".txt" style="flex:1;margin:0">
+        <button class="btn" id="upload-btn" onclick="uploadCookies()" style="flex:none;padding:11px 18px;font-size:13px">Upload Cookies</button>
+      </div>
+      <div style="margin-top:14px">
+        <button onclick="clearHistory()" style="background:none;border:none;color:#555;font-size:12px;font-weight:600;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px">Clear download history…</button>
+      </div>
+      <div id="upload-msg" style="margin-top:10px"></div>
     </div>
 
     <div class="card">
@@ -983,33 +988,6 @@ ADMIN_HTML = """
         </div>
       </div>
 
-      <div class="section-head">Downloads</div>
-      <div class="stat-grid" id="stat-grid"></div>
-
-      <div class="card">
-        <div class="card-title">Downloads by Type</div>
-        <div class="type-row" id="type-row"></div>
-      </div>
-
-      <div class="card" id="active-card" style="display:none">
-        <div class="card-title">Active Jobs</div>
-        <table class="tbl" id="active-tbl">
-          <thead><tr>
-            <th>Type</th><th>URL</th><th>Progress</th><th>Status</th>
-          </tr></thead>
-          <tbody id="active-body"></tbody>
-        </table>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Recent Downloads <span id="recent-count" style="color:#555;font-weight:400;font-size:11px;margin-left:6px"></span></div>
-        <table class="tbl" id="recent-tbl">
-          <thead><tr>
-            <th>Time</th><th>Type</th><th>URL</th><th>Status</th>
-          </tr></thead>
-          <tbody id="recent-body"></tbody>
-        </table>
-      </div>
     </div>
   </div>
 
@@ -1118,6 +1096,9 @@ ADMIN_HTML = """
     }
 
     loadPauseStatus();
+    document.getElementById('pw').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') loadStats();
+    });
 
     async function clearHistory() {
       const msg = document.getElementById('upload-msg');
@@ -1143,60 +1124,6 @@ ADMIN_HTML = """
       renderBuilds(d.builds, d.trial_builds);
       renderReviews(d.pending_reviews, d.approved_reviews, d.review_aggregate);
 
-      // Summary cards
-      const total    = d.total_history;
-      const done     = (d.by_status.done || 0);
-      const errors   = (d.by_status.error || 0);
-      const succRate = total ? Math.round(done / total * 100) : 0;
-      document.getElementById('stat-grid').innerHTML =
-        '<div class="stat-card"><div class="stat-label">Total Downloads</div>'
-          +'<div class="stat-val c-pink">'+total+'</div>'
-          +'<div class="stat-sub">all time (last 500)</div></div>'
-        +'<div class="stat-card"><div class="stat-label">Successful</div>'
-          +'<div class="stat-val c-green">'+done+'</div>'
-          +'<div class="stat-sub">'+succRate+'% success rate</div></div>'
-        +'<div class="stat-card"><div class="stat-label">Errors</div>'
-          +'<div class="stat-val c-red">'+errors+'</div>'
-          +'<div class="stat-sub">'+(d.by_status.cancelled||0)+' cancelled</div></div>'
-        +'<div class="stat-card"><div class="stat-label">Running Now</div>'
-          +'<div class="stat-val c-blue">'+d.running+'</div>'
-          +'<div class="stat-sub">'+d.queue_length+' queued &middot; v'+d.version+'</div></div>';
-
-      // Type pills
-      const typeHtml = Object.entries(d.by_type)
-        .sort((a,b) => b[1]-a[1])
-        .map(([t,c]) => typePill(t, c)).join('');
-      document.getElementById('type-row').innerHTML = typeHtml || '<span style="color:#555">No data</span>';
-
-      // Active jobs
-      const activeCard = document.getElementById('active-card');
-      if (d.active_jobs && d.active_jobs.length) {
-        activeCard.style.display = '';
-        document.getElementById('active-body').innerHTML = d.active_jobs.map(j =>
-          '<tr>'
-          +'<td><span class="badge" style="background:rgba(219,82,166,0.15);color:'+
-              (TYPE_COLORS[j.type]||'#888')+'">'+j.type+'</span></td>'
-          +'<td class="url-cell" title="'+escHtml(j.url||'')+'">'+escHtml(truncUrl(j.url))+'</td>'
-          +'<td style="color:#5b9cf6;font-weight:700">'+(j.progress_pct||0)+'%</td>'
-          +'<td>'+statusBadge(j.status)+'</td>'
-          +'</tr>'
-        ).join('');
-      } else {
-        activeCard.style.display = 'none';
-      }
-
-      // Recent table
-      document.getElementById('recent-count').textContent =
-        '(' + d.recent.length + ' shown)';
-      document.getElementById('recent-body').innerHTML = d.recent.map(item =>
-        '<tr>'
-        +'<td class="time-cell">'+relTime(item.timestamp)+'</td>'
-        +'<td><span class="badge" style="background:rgba(219,82,166,0.12);color:'
-            +(TYPE_COLORS[item.type]||'#888')+'">'+escHtml(item.type||'?')+'</span></td>'
-        +'<td class="url-cell" title="'+escHtml(item.url||'')+'">'+escHtml(truncUrl(item.url))+'</td>'
-        +'<td>'+statusBadge(item.final_status||'unknown')+'</td>'
-        +'</tr>'
-      ).join('') || '<tr><td colspan="4" style="color:#555;padding:16px 0">No history yet</td></tr>';
     }
 
     function truncUrl(url) {
@@ -1242,7 +1169,7 @@ ADMIN_HTML = """
           + bar + '<div class="chart-lbl">' + lbl + '</div></div>';
       }).join('');
 
-      var paths = pv.by_path || [];
+      var paths = (pv.by_path || []).slice(0, 10);
       var pmax = 1;
       paths.forEach(function (p) { if (p.count > pmax) pmax = p.count; });
       document.getElementById('pv-paths').innerHTML = paths.length
@@ -1255,7 +1182,7 @@ ADMIN_HTML = """
           }).join('')
         : '<span style="color:#555;font-size:13px">No views yet</span>';
 
-      var recent = pv.recent || [];
+      var recent = (pv.recent || []).slice(0, 10);
       document.getElementById('pv-recent').innerHTML = recent.length
         ? recent.map(function (r) {
             return '<tr><td class="time-cell">' + relTimeTs(r.ts) + '</td>'
