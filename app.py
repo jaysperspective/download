@@ -4803,6 +4803,19 @@ def desktop_update():
     )
 
 
+@app.get("/desktop/latest")
+def desktop_latest():
+    """Machine-readable latest desktop version, read live from the paid build
+    manifest. The desktop app polls this once a day to surface a non-blocking
+    in-app 'update available' banner — it never gates anything. Returns
+    {"version": "x.y.z"} ("" if no build is published)."""
+    version = (_load_builds_manifest().get("version") or "").strip()
+    resp = jsonify({"version": version})
+    # The version only moves on a release — let Cloudflare/proxies cache briefly.
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
 @app.get("/trial")
 def desktop_trial():
     """Free-trial download page. Public and token-less — serves the
