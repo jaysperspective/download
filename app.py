@@ -1668,6 +1668,116 @@ HTML = r"""
     #meta a { color: #db52a6; text-decoration: none; }
     #meta a:hover { text-decoration: underline; }
 
+    /* ── Interactive demo: full app screen, mini (canned) ─── */
+    .demo { max-width: 940px; margin: 0 auto 40px; }
+    .demo-eyebrow { display: block; text-align: center; font-size: 12px; font-weight: 700; color: #bf9b3a; letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 16px; }
+    .demo-window { border-radius: 14px; overflow: hidden; border: 1px solid #2e2c2c; box-shadow: 0 30px 70px rgba(0,0,0,0.55); background: #151313; }
+    .demo-titlebar { display: flex; align-items: center; gap: 8px; padding: 10px 13px; background: #211f1f; border-bottom: 1px solid #2e2c2c; }
+    .demo-dot { width: 11px; height: 11px; border-radius: 50%; }
+    .demo-dot.r { background: #ff5f57; } .demo-dot.y { background: #febc2e; } .demo-dot.g { background: #28c840; }
+    .demo-titletext { flex: 1; text-align: center; font-size: 11px; font-weight: 600; color: #8a828a; margin-right: 33px; }
+    .demo-app { padding: 14px; background: #161414; }
+    .demo-apphead { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .demo-applogo { font-size: 17px; font-weight: 800; color: #db52a6; letter-spacing: -0.4px; }
+    .demo-appbadge { font-size: 9px; color: #777; }
+    .demo-appspacer { flex: 1; }
+    .demo-hlink { font-size: 10px; color: #5a555a; }
+    .demo-hlink.gold { color: #bf9b3a; }
+    .demo-pill { font-size: 10px; font-weight: 700; color: #fff; padding: 4px 9px; border-radius: 7px; }
+    .demo-pill.sub { background: linear-gradient(135deg, #db52a6, #bf9b3a); }
+    .demo-pill.pay { background: linear-gradient(135deg, #f5a623, #f0782a); }
+    .demo-body { display: grid; grid-template-columns: minmax(0, 33%) minmax(0, 1fr); gap: 11px; }
+    .demo-col { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+    .demo-panel { background: #1c1a1a; border: 1px solid #2a2828; border-radius: 11px; padding: 12px; }
+    .demo-plabel { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #bf9b3a; margin-bottom: 8px; }
+    .demo-approw { display: flex; gap: 7px; }
+    .demo-appurl { flex: 1; min-width: 0; background: #141212; border: 1px solid #2e2c2c; border-radius: 8px; padding: 9px 11px; font-size: 11px; color: #cbb8c6; outline: none; cursor: default; }
+    .demo-appdl { background: #db52a6; color: #fff; border: none; border-radius: 8px; padding: 0 14px; font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap; transition: background 0.15s; }
+    .demo-appdl:hover { background: #c9479a; } .demo-appdl:disabled { opacity: 0.55; cursor: default; }
+    .demo-selrow { display: flex; gap: 7px; margin-top: 8px; }
+    .demo-sel { flex: 1; min-width: 0; background: #141212; border: 1px solid #2e2c2c; color: #cbb8c6; padding: 7px 10px; border-radius: 8px; font-size: 10px; outline: none; cursor: pointer; }
+    .demo-empty { font-size: 10px; color: #5a555a; }
+    .demo-job { display: none; margin-top: 8px; background: #211f1f; border: 1px solid #2e2c2c; border-radius: 9px; padding: 10px; }
+    .demo-job.show { display: block; }
+    .demo-job-top { display: flex; align-items: center; gap: 8px; }
+    .demo-job-ico { color: #db52a6; flex-shrink: 0; display: flex; }
+    .demo-job-name { font-size: 11px; font-weight: 600; color: #f0eef0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .demo-job-pct { font-size: 10px; color: #bf9b3a; }
+    .demo-job-track { margin-top: 8px; height: 7px; background: #141212; border-radius: 5px; overflow: hidden; }
+    .demo-job-bar { height: 100%; width: 0%; border-radius: 5px; background: linear-gradient(90deg, #db52a6, #bf9b3a); transition: width 0.3s ease; }
+    .demo-job-phase { font-size: 10px; color: #8a828a; margin-top: 6px; }
+    .demo-job-check { display: none; color: #48c78e; font-weight: 800; }
+    .demo-job.done .demo-job-phase { color: #48c78e; } .demo-job.done .demo-job-track { display: none; } .demo-job.done .demo-job-check { display: inline; } .demo-job.done .demo-job-pct { display: none; }
+    .demo-mp-top { display: flex; align-items: center; gap: 9px; }
+    .demo-mp-art { width: 30px; height: 30px; border-radius: 6px; background: linear-gradient(135deg, #3a2a34, #2e2c2c); display: flex; align-items: center; justify-content: center; color: #db52a6; flex-shrink: 0; }
+    .demo-mp-t { font-size: 11px; font-weight: 600; color: #cbb8c6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .demo-mp-s { font-size: 10px; color: #5a555a; }
+    .demo-mp-seek { margin: 10px 0; height: 4px; background: #141212; border-radius: 3px; position: relative; }
+    .demo-mp-knob { position: absolute; left: 0; top: 50%; transform: translate(-2px,-50%); width: 9px; height: 9px; border-radius: 50%; background: #db52a6; transition: left 0.3s ease; }
+    .demo-mp-ctrls { display: flex; align-items: center; justify-content: center; gap: 13px; color: #7a727a; }
+    .demo-mp-play { width: 28px; height: 28px; border-radius: 50%; background: #db52a6; color: #fff; display: flex; align-items: center; justify-content: center; }
+    .demo-burn { display: flex; align-items: center; gap: 9px; }
+    .demo-burn-disc { width: 26px; height: 26px; border-radius: 50%; background: conic-gradient(from 0deg, #db52a6, #bf9b3a, #9b3adb, #db52a6); flex-shrink: 0; }
+    .demo-burn-t { font-size: 12px; font-weight: 700; color: #f0eef0; }
+    .demo-burn-s { font-size: 10px; color: #e0685e; }
+    .demo-video { background: #0a0808; border-radius: 9px; aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; }
+    .demo-video-play { width: 46px; height: 46px; border-radius: 50%; background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center; }
+    .demo-vq { display: flex; justify-content: space-between; font-size: 9px; color: #5a555a; margin-top: 8px; }
+    .demo-libtabs { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; }
+    .demo-tab { font-size: 11px; font-weight: 600; color: #7a727a; padding: 5px 11px; border-radius: 7px; }
+    .demo-tab.on { background: #db52a6; color: #fff; }
+    .demo-libspacer { flex: 1; }
+    .demo-sortbtn { font-size: 10px; color: #888; border: 1px solid #2e2c2c; border-radius: 7px; padding: 5px 9px; }
+    .demo-search { width: 100%; box-sizing: border-box; background: #141212; border: 1px solid #2e2c2c; border-radius: 8px; padding: 9px 12px; font-size: 11px; color: #7a727a; margin-bottom: 6px; }
+    .demo-alb { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #221f1f; }
+    .demo-alb-art { width: 38px; height: 38px; border-radius: 6px; flex-shrink: 0; }
+    .demo-alb-meta { flex: 1; min-width: 0; }
+    .demo-alb-t { font-size: 12px; font-weight: 600; color: #f0eef0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .demo-alb-s { font-size: 10px; color: #6a656a; }
+    .demo-alb-s .src { color: #9b3adb; }
+    .demo-alb-btns { display: flex; gap: 5px; flex-shrink: 0; }
+    .demo-alb-btn { font-size: 9px; color: #8a828a; border: 1px solid #2e2c2c; border-radius: 6px; padding: 4px 7px; white-space: nowrap; }
+    @media (max-width: 720px) { .demo-body { grid-template-columns: 1fr; } .demo-alb-btns { display: none; } }
+    .demo-cta-wrap { text-align: center; margin-top: 18px; }
+    .demo-cta-copy { font-size: 13px; color: #aaa; margin: 0 0 12px; line-height: 1.5; }
+    .demo-ctas { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .demo-cta-alt { font-size: 13px; color: #bf9b3a; text-decoration: none; }
+    .demo-cta-alt:hover { text-decoration: underline; }
+    .demo-foot { font-size: 11px; color: #666; text-align: center; margin: 12px 0 0; }
+    .demo-window { position: relative; }
+    .demo-tourbar { text-align: center; margin-bottom: 16px; }
+    .demo-tourbtn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 16px; background: #211f1f; border: 1px solid #2e2c2c; border-radius: 999px; color: #f0eef0; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+    .demo-tourbtn:hover { border-color: #db52a6; color: #db52a6; }
+    .demo-tourbtn .tb-ico { color: #db52a6; font-size: 10px; }
+    .demo-tour-on .demo-panel { transition: opacity 0.25s, box-shadow 0.25s; }
+    .demo-tour-on .demo-panel:not(.tour-spot) { opacity: 0.3; }
+    .demo-panel.tour-spot { position: relative; opacity: 1 !important; box-shadow: 0 0 0 2px #db52a6, 0 0 0 6px rgba(219,82,166,0.18), 0 14px 40px rgba(0,0,0,0.5); z-index: 3; }
+    .demo-tourcap { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 5; display: none; background: #241f23; border: 1px solid #db52a6; border-radius: 12px; padding: 14px 16px; box-shadow: 0 16px 44px rgba(0,0,0,0.6); }
+    .demo-tourcap.show { display: block; }
+    .demo-tourcap-step { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #bf9b3a; margin-bottom: 5px; }
+    .demo-tourcap-title { font-size: 14px; font-weight: 700; color: #f0eef0; margin-bottom: 4px; }
+    .demo-tourcap-body { font-size: 12px; color: #c8c0c8; line-height: 1.5; }
+    .demo-tourcap-nav { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+    .demo-tourcap-dots { display: flex; gap: 5px; flex: 1; }
+    .demo-tourcap-dot { width: 6px; height: 6px; border-radius: 50%; background: #4a444a; }
+    .demo-tourcap-dot.on { background: #db52a6; }
+    .demo-tourcap-skip { background: transparent; border: none; color: #8a828a; font-size: 12px; cursor: pointer; }
+    .demo-tourcap-next { background: #db52a6; color: #fff; border: none; border-radius: 8px; padding: 7px 16px; font-size: 12px; font-weight: 700; cursor: pointer; }
+    .demo-tourcap-next:hover { background: #c9479a; }
+    .demo-overlay { position: absolute; inset: 0; z-index: 8; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; background: rgba(16,13,13,0.84); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+    .demo-overlay.hide { display: none; }
+    .ov-inner { max-width: 360px; }
+    .ov-play { width: 60px; height: 60px; border-radius: 50%; border: none; background: #db52a6; color: #fff; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 10px 30px rgba(219,82,166,0.5); transition: transform 0.15s; margin-bottom: 16px; padding-left: 3px; }
+    .ov-play:hover { transform: scale(1.06); }
+    .ov-h { font-size: 20px; font-weight: 800; color: #f0eef0; margin-bottom: 6px; }
+    .ov-p { font-size: 13px; color: #c8c0c8; line-height: 1.55; margin-bottom: 18px; }
+    .ov-cta { background: #db52a6; color: #fff; border: none; border-radius: 10px; padding: 12px 26px; font-size: 14px; font-weight: 700; cursor: pointer; transition: background 0.15s; }
+    .ov-cta:hover { background: #c9479a; }
+    .ov-dismiss { display: block; margin: 14px auto 0; background: transparent; border: none; color: #9a8f9a; font-size: 12px; cursor: pointer; }
+    .ov-dismiss:hover { color: #cbb8c6; }
+    .ov-alt { display: block; margin-top: 12px; color: #bf9b3a; font-size: 13px; text-decoration: none; }
+    .ov-alt:hover { text-decoration: underline; }
+
     /* Paused banner */
     .paused-banner {
       display: none; background: #2a1a1a; border: 1.5px solid #e05c5c;
@@ -2092,17 +2202,287 @@ HTML = r"""
           <span class="rs-text">{{ avg_rating }} &middot; {{ review_count }} review{{ 's' if review_count != 1 else '' }}</span>
         </a>
         {% endif %}
-        <div class="trial-cta">
-          <a class="btn-trial" href="/trial">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Try the <span class="tg">free trial</span> &mdash; no payment
-          </a>
+      </div>
+
+      <!-- ===== Interactive demo: full app screen, mini (canned) ===== -->
+      <div class="demo" id="demo">
+        <span class="demo-eyebrow">See it in action</span>
+        <div class="demo-window">
+          <div class="demo-titlebar">
+            <span class="demo-dot r"></span><span class="demo-dot y"></span><span class="demo-dot g"></span>
+            <span class="demo-titletext">+downloads</span>
+          </div>
+          <div class="demo-app">
+            <div class="demo-apphead">
+              <span class="demo-applogo">+downloads</span>
+              <span class="demo-appbadge">v3.1.0</span>
+              <span class="demo-appspacer"></span>
+              <span class="demo-hlink">Instructions</span>
+              <span class="demo-hlink">Terms</span>
+              <span class="demo-hlink gold">&#9733; Review</span>
+              <span class="demo-pill sub">&#9993; Subscribe</span>
+              <span class="demo-pill pay">&#9829; Proud 2 Pay</span>
+            </div>
+
+            <div class="demo-body">
+              <div class="demo-col">
+                <div class="demo-panel">
+                  <div class="demo-approw">
+                    <input class="demo-appurl" id="demoUrl" value="https://youtube.com/watch?v=aqz-KE-bpKQ" readonly spellcheck="false" aria-label="Example link">
+                    <button class="demo-appdl" id="demoBtn" onclick="demoStart()">Download</button>
+                  </div>
+                  <div class="demo-selrow">
+                    <select class="demo-sel" id="demoType" onchange="demoReset()">
+                      <option value="video">Video (MP4)</option>
+                      <option value="audio">Audio (MP3)</option>
+                    </select>
+                    <select class="demo-sel"><option>Best quality</option></select>
+                  </div>
+                </div>
+
+                <div class="demo-panel">
+                  <div class="demo-plabel" style="color:#8a828a;">Downloads</div>
+                  <div class="demo-empty" id="demoEmpty">Paste one or more links above to start downloading.</div>
+                  <div class="demo-job" id="demoJob">
+                    <div class="demo-job-top">
+                      <span class="demo-job-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 3H6a1 1 0 00-1 1v16a1 1 0 001 1h12a1 1 0 001-1V8l-5-5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M14 3v5h5" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></span>
+                      <span class="demo-job-name" id="demoJobName">Big Buck Bunny.mp4</span>
+                      <span class="demo-job-pct" id="demoJobPct">0%</span>
+                      <span class="demo-job-check">&#10003;</span>
+                    </div>
+                    <div class="demo-job-track"><div class="demo-job-bar" id="demoJobBar"></div></div>
+                    <div class="demo-job-phase" id="demoJobPhase">Fetching&hellip;</div>
+                  </div>
+                </div>
+
+                <div class="demo-panel">
+                  <div class="demo-plabel">+Music</div>
+                  <div class="demo-mp-top">
+                    <span class="demo-mp-art"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></span>
+                    <div style="flex:1; min-width:0;">
+                      <div class="demo-mp-t" id="demoMpT">No track loaded</div>
+                      <div class="demo-mp-s" id="demoMpS">Add songs from the Library &rarr;</div>
+                    </div>
+                  </div>
+                  <div class="demo-mp-seek"><span class="demo-mp-knob" id="demoMpKnob"></span></div>
+                  <div class="demo-mp-ctrls">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 4l3 3-3 3M3 7h18M6 14l-3 3 3 3M21 17H3"/></svg>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+                    <span class="demo-mp-play"><svg width="11" height="11" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2l4 4-4 4M7 22l-4-4 4-4M21 6H8a5 5 0 00-5 5M3 18h13a5 5 0 005-5"/></svg>
+                  </div>
+                </div>
+
+                <div class="demo-panel">
+                  <div class="demo-burn">
+                    <span class="demo-burn-disc"></span>
+                    <div style="flex:1; min-width:0;">
+                      <div class="demo-burn-t">Burn a CD</div>
+                      <div class="demo-burn-s">No optical drive found</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="demo-col">
+                <div class="demo-panel">
+                  <div class="demo-plabel">+Video</div>
+                  <div class="demo-video"><span class="demo-video-play"><svg width="18" height="18" viewBox="0 0 24 24" fill="#161414"><path d="M8 5v14l11-7z"/></svg></span></div>
+                  <div class="demo-vq"><span>QUEUE</span><span>0 videos</span></div>
+                </div>
+
+                <div class="demo-panel">
+                  <div class="demo-libtabs">
+                    <span class="demo-tab on">Albums</span>
+                    <span class="demo-tab">Songs</span>
+                    <span class="demo-tab">Videos</span>
+                    <span class="demo-libspacer"></span>
+                    <span class="demo-sortbtn">Newest first</span>
+                  </div>
+                  <div class="demo-search">Search library&hellip;</div>
+                  <div class="demo-alb" style="border-top:none;">
+                    <span class="demo-alb-art" style="background:linear-gradient(135deg,#1c1c1c,#3a3a3a);"></span>
+                    <div class="demo-alb-meta"><div class="demo-alb-t">Late Night Mix</div><div class="demo-alb-s"><span class="src">spotify</span> &middot; 14 tracks &middot; 2026-06-30</div></div>
+                    <div class="demo-alb-btns"><span class="demo-alb-btn">Reveal</span><span class="demo-alb-btn">ZIP</span><span class="demo-alb-btn">+ Queue</span></div>
+                  </div>
+                  <div class="demo-alb">
+                    <span class="demo-alb-art" style="background:linear-gradient(135deg,#e8622a,#f0a500);"></span>
+                    <div class="demo-alb-meta"><div class="demo-alb-t">Summer Roadtrip</div><div class="demo-alb-s"><span class="src">spotify</span> &middot; 27 tracks &middot; 2026-06-04</div></div>
+                    <div class="demo-alb-btns"><span class="demo-alb-btn">Reveal</span><span class="demo-alb-btn">ZIP</span><span class="demo-alb-btn">+ Queue</span></div>
+                  </div>
+                  <div class="demo-alb">
+                    <span class="demo-alb-art" style="background:linear-gradient(135deg,#222,#555);"></span>
+                    <div class="demo-alb-meta"><div class="demo-alb-t">Chill Focus Beats</div><div class="demo-alb-s"><span class="src">spotify</span> &middot; 14 tracks &middot; 2026-06-04</div></div>
+                    <div class="demo-alb-btns"><span class="demo-alb-btn">Reveal</span><span class="demo-alb-btn">ZIP</span><span class="demo-alb-btn">+ Queue</span></div>
+                  </div>
+                  <div class="demo-alb">
+                    <span class="demo-alb-art" style="background:linear-gradient(135deg,#db52a6,#9b3adb);"></span>
+                    <div class="demo-alb-meta"><div class="demo-alb-t">Live Session Vol. 1</div><div class="demo-alb-s"><span class="src">youtube</span> &middot; 9 tracks &middot; 2026-05-28</div></div>
+                    <div class="demo-alb-btns"><span class="demo-alb-btn">Reveal</span><span class="demo-alb-btn">ZIP</span><span class="demo-alb-btn">+ Queue</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="demo-tourcap" id="demoTourCap">
+            <div class="demo-tourcap-step" id="demoTourStep">Step 1 of 5</div>
+            <div class="demo-tourcap-title" id="demoTourTitle"></div>
+            <div class="demo-tourcap-body" id="demoTourBody"></div>
+            <div class="demo-tourcap-nav">
+              <div class="demo-tourcap-dots" id="demoTourDots"></div>
+              <button class="demo-tourcap-skip" onclick="demoTourEnd()">Skip</button>
+              <button class="demo-tourcap-next" id="demoTourNext" onclick="demoTourNext()">Next</button>
+            </div>
+          </div>
+          <div class="demo-overlay" id="demoOverlay">
+            <div class="ov-inner" id="ovStart">
+              <button class="ov-play" onclick="demoTourStart()" aria-label="Take the tour"><svg width="26" height="26" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></button>
+              <div class="ov-h">Take a quick tour</div>
+              <div class="ov-p">See the whole app &mdash; download, play, library &mdash; in 20 seconds.</div>
+              <button class="ov-cta" onclick="demoTourStart()">Start the tour</button>
+              <button class="ov-dismiss" onclick="demoOverlayHide()">or explore on your own</button>
+            </div>
+            <div class="ov-inner" id="ovEnd" style="display:none;">
+              <div class="ov-h">That&rsquo;s +downloads.</div>
+              <div class="ov-p">The whole app, yours for a one-time <b>$1.99</b>. No subscriptions, no limits.</div>
+              <a class="btn-buy" href="/desktop/buy" onclick="demoRef('demo-buy')">Get +downloads &mdash; $1.99</a>
+              <a class="ov-alt" href="/trial" onclick="demoRef('demo-trial')">Or grab the free edition first</a>
+              <button class="ov-dismiss" onclick="demoTourStart()">&#8635; Replay tour</button>
+            </div>
+          </div>
         </div>
+
+        <div class="demo-cta-wrap">
+          <p class="demo-cta-copy">The whole app &mdash; downloader, music &amp; video players, and your library &mdash; running on your own computer.</p>
+          <div class="demo-ctas">
+            <a class="btn-buy" href="/desktop/buy" onclick="demoRef('demo-buy')">Get +downloads &mdash; $1.99</a>
+            <a class="demo-cta-alt" href="/trial" onclick="demoRef('demo-trial')">Or grab the free edition first</a>
+          </div>
+        </div>
+        <p class="demo-foot">Interactive demo &mdash; nothing downloads in your browser. The desktop app saves real files to your computer.</p>
+      </div>
+      <script>
+        (function(){
+          function beacon(t){ try{ fetch('/?ref=' + t, {method:'GET', keepalive:true}); }catch(e){} }
+          window.demoRef = beacon;
+          function el(id){ return document.getElementById(id); }
+          var started = false;
+          window.demoReset = function(){
+            el('demoJob').className = 'demo-job';
+            el('demoEmpty').style.display = '';
+            el('demoJobBar').style.width = '0%';
+            el('demoJobPct').textContent = '0%';
+            el('demoMpT').textContent = 'No track loaded';
+            el('demoMpS').textContent = 'Add songs from the Library →';
+            el('demoMpKnob').style.left = '0%';
+            el('demoBtn').disabled = false;
+          };
+          window.demoStart = function(){
+            var btn = el('demoBtn'); if (btn.disabled) return; btn.disabled = true;
+            if (!started) { beacon('demo-start'); started = true; }
+            var audio = el('demoType').value === 'audio';
+            var name = audio ? 'Big Buck Bunny.mp3' : 'Big Buck Bunny.mp4';
+            el('demoJobName').textContent = name;
+            el('demoEmpty').style.display = 'none';
+            el('demoJob').className = 'demo-job show';
+            var bar = el('demoJobBar'), pct = el('demoJobPct'), phase = el('demoJobPhase');
+            var steps = audio
+              ? [[22,'Fetching track info…'],[72,'Downloading audio…'],[93,'Converting to MP3…'],[100,'Done']]
+              : [[16,'Fetching video info…'],[52,'Downloading video (1080p)…'],[82,'Downloading audio…'],[96,'Merging streams…'],[100,'Done']];
+            var p = 0, i = 0;
+            (function run(){
+              if (i >= steps.length) { finish(audio); return; }
+              phase.textContent = steps[i][1];
+              (function grow(){
+                if (p < steps[i][0]) { p = Math.min(steps[i][0], p + Math.random()*6 + 2); bar.style.width = p + '%'; pct.textContent = Math.round(p) + '%'; setTimeout(grow, 80 + Math.random()*100); }
+                else { i++; setTimeout(run, 240); }
+              })();
+            })();
+          };
+          function finish(audio){
+            el('demoJob').className = 'demo-job show done';
+            el('demoJobPhase').textContent = audio ? 'Done · saved to your Downloads folder · 320 kbps' : 'Done · saved to your Downloads folder · 1080p';
+            el('demoMpT').textContent = 'Big Buck Bunny';
+            el('demoMpS').textContent = audio ? 'MP3 · 320 kbps · now in your library' : 'MP4 · 1080p · now in your library';
+            el('demoMpKnob').style.left = '18%';
+            el('demoBtn').disabled = false;
+          }
+
+          var TOUR = [
+            { find: function(){ return el('demoUrl').closest('.demo-panel'); }, step: 'Step 1 of 5', title: 'Paste a link', body: 'Drop any link — YouTube, Spotify, Apple Music, SoundCloud — choose a format, and hit Download.' },
+            { find: function(){ return el('demoJob').closest('.demo-panel'); }, step: 'Step 2 of 5', title: 'It downloads here', body: 'Every download tracks live in the queue. Paste a whole list and each one lines up on its own.', enter: function(){ if (!started) window.demoStart(); } },
+            { find: function(){ return el('demoMpT').closest('.demo-panel'); }, step: 'Step 3 of 5', title: 'Built-in music player', body: 'Finished songs load straight into the player — shuffle, repeat, and your own queue.' },
+            { find: function(){ return document.querySelector('.demo-video').closest('.demo-panel'); }, step: 'Step 4 of 5', title: 'Watch videos in-app', body: 'Downloaded videos play right inside +downloads — no other app needed.' },
+            { find: function(){ return document.querySelector('.demo-libtabs').closest('.demo-panel'); }, step: 'Step 5 of 5', title: 'Your whole library', body: 'Everything organizes into albums, songs and videos — offline and yours forever. One-time $1.99.' }
+          ];
+          var tourIdx = -1;
+          function clearSpots(){ var ps = document.querySelectorAll('.demo-panel'); for (var k = 0; k < ps.length; k++) ps[k].classList.remove('tour-spot'); }
+          window.demoOverlayHide = function(){ el('demoOverlay').classList.add('hide'); };
+          window.demoTourStart = function(){
+            el('demoOverlay').classList.add('hide');
+            el('ovEnd').style.display = 'none'; el('ovStart').style.display = '';
+            beacon('demo-tour');
+            window.demoTour(0);
+          };
+          window.demoTour = function(i){
+            document.querySelector('.demo-app').classList.add('demo-tour-on');
+            clearSpots();
+            var s = TOUR[i]; tourIdx = i;
+            var panel = s.find(); panel.classList.add('tour-spot');
+            el('demoTourStep').textContent = s.step;
+            el('demoTourTitle').textContent = s.title;
+            el('demoTourBody').textContent = s.body;
+            var dots = ''; for (var d = 0; d < TOUR.length; d++) dots += '<span class="demo-tourcap-dot' + (d === i ? ' on' : '') + '"></span>';
+            el('demoTourDots').innerHTML = dots;
+            el('demoTourNext').textContent = (i === TOUR.length - 1) ? 'Done' : 'Next';
+            var cap = el('demoTourCap'); cap.classList.add('show');
+            if (s.enter) s.enter();
+            var win = document.querySelector('.demo-window');
+            var ch = cap.offsetHeight, wh = win.clientHeight;
+            var top = panel.offsetTop + panel.offsetHeight + 10;
+            if (top + ch + 14 > wh) top = panel.offsetTop - ch - 10;
+            if (top < 14) top = 14;
+            cap.style.top = top + 'px'; cap.style.bottom = 'auto';
+          };
+          window.demoTourNext = function(){ if (tourIdx >= TOUR.length - 1) demoTourFinish(); else window.demoTour(tourIdx + 1); };
+          window.demoTourEnd = function(){
+            document.querySelector('.demo-app').classList.remove('demo-tour-on');
+            clearSpots(); el('demoTourCap').classList.remove('show'); tourIdx = -1;
+          };
+          function demoTourFinish(){
+            document.querySelector('.demo-app').classList.remove('demo-tour-on');
+            clearSpots(); el('demoTourCap').classList.remove('show'); tourIdx = -1;
+            beacon('demo-tour-done');
+            el('ovStart').style.display = 'none'; el('ovEnd').style.display = '';
+            el('demoOverlay').classList.remove('hide');
+          }
+        })();
+      </script>
+
+      {% if reviews_html %}
+      <div class="reviews">
+        <div class="reviews-frame">
+          <span class="rf-corner tl"></span><span class="rf-corner tr"></span>
+          <span class="rf-corner bl"></span><span class="rf-corner br"></span>
+          <span class="reviews-eyebrow">★ {{ avg_rating }} from {{ review_count }} review{{ 's' if review_count != 1 else '' }}</span>
+          <h2 class="reviews-title">What people are saying</h2>
+          <div class="reviews-grid">{{ reviews_html|safe }}</div>
+          <a class="reviews-cta" href="/review">★ Leave a review</a>
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="trial-cta" style="text-align: center; margin: 6px auto 44px;">
+        <a class="btn-trial" href="/trial">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Try the <span class="tg">free trial</span> &mdash; no payment
+        </a>
       </div>
 
       <!-- Screenshots -->
       <div class="shots">
-        <span class="shots-label">See it in action</span>
+        <span class="shots-label">A look inside the app</span>
         <div class="shot-hero">
           <img src="/static/shot-app.png" alt="The +downloads desktop app — downloader, music player and video library in one window" width="2000" height="1193" loading="lazy">
         </div>
@@ -2154,19 +2534,6 @@ HTML = r"""
           <p>One purchase, every future version. New site support, new formats, new features — all included.</p>
         </div>
       </div>
-
-      {% if reviews_html %}
-      <div class="reviews">
-        <div class="reviews-frame">
-          <span class="rf-corner tl"></span><span class="rf-corner tr"></span>
-          <span class="rf-corner bl"></span><span class="rf-corner br"></span>
-          <span class="reviews-eyebrow">★ {{ avg_rating }} from {{ review_count }} review{{ 's' if review_count != 1 else '' }}</span>
-          <h2 class="reviews-title">What people are saying</h2>
-          <div class="reviews-grid">{{ reviews_html|safe }}</div>
-          <a class="reviews-cta" href="/review">★ Leave a review</a>
-        </div>
-      </div>
-      {% endif %}
 
       <!-- Supported sites -->
       <div class="sites">
