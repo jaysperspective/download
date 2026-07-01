@@ -10,4 +10,4 @@ COPY static/ static/
 ENV DOWNLOAD_DIR=/data/downloads
 VOLUME ["/data"]
 EXPOSE 5055
-CMD ["gunicorn", "-w", "1", "--threads", "8", "-b", "0.0.0.0:5055", "--timeout", "300", "app:app"]
+CMD ["gunicorn", "-w", "1", "--threads", "8", "-b", "127.0.0.1:5055", "--timeout", "300", "app:app"]
