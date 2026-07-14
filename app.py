@@ -68,6 +68,28 @@ def _init_analytics_db():
 
 _init_analytics_db()
 
+# Desktop launch-ping analytics — one row per app launch (client throttles to 1/24h
+# per install). Restores the active-install metric that lived in the decommissioned
+# urapages AppLaunchEvent table. Same analytics.db, but NOT pruned (kept for history).
+# ios_scan_events restores the urapages IosQrScanEvent redirect counter.
+def _init_launch_db():
+    with _analytics_lock, _analytics_conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS launch_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "app TEXT, version TEXT, os TEXT, edition TEXT, ua TEXT, "
+            "created_at INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_launch_created ON launch_events(created_at)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ios_scan_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "source TEXT, ua TEXT, created_at INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ios_scan_created ON ios_scan_events(created_at)")
+
+_init_launch_db()
+
 # Customer reviews — a SEPARATE db file so the 90-day pageview prune never touches
 # them. Reviews are admin-moderated: nothing is shown publicly until approved.
 REVIEWS_DB = _data_dir / "reviews.db"
@@ -237,6 +259,69 @@ def _pageview_analytics() -> dict:
         pass
     return out
 
+def _record_launch(app_name: str, version: str, os_str: str, edition: str, ua: str):
+    try:
+        with _analytics_lock, _analytics_conn() as conn:
+            conn.execute(
+                "INSERT INTO launch_events (app, version, os, edition, ua, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (app_name, version, os_str, edition, ua, int(time.time())),
+            )
+    except Exception:
+        pass
+
+def _record_ios_scan(source: str, ua: str):
+    try:
+        with _analytics_lock, _analytics_conn() as conn:
+            conn.execute(
+                "INSERT INTO ios_scan_events (source, ua, created_at) VALUES (?, ?, ?)",
+                (source, ua, int(time.time())),
+            )
+    except Exception:
+        pass
+
+def _launch_analytics() -> dict:
+    """Active-install stats from launch pings. DAU = pings in the last 24h — a good
+    active-install proxy since the client throttles to one ping per install per 24h.
+    The 7d/30d numbers are launch *counts* (an install pings ~once/day), so they're
+    labelled 'launches', not deduped installs (the ping carries no device id by design)."""
+    now = int(time.time())
+    out = {"dau": 0, "l7": 0, "l30": 0, "total": 0, "first": None,
+           "by_version": [], "by_os": [], "by_edition": [], "daily": []}
+    try:
+        conn = _analytics_conn()
+        try:
+            cur = conn.cursor()
+            def c(sql, *a): return cur.execute(sql, a).fetchone()[0]
+            out["dau"] = c("SELECT COUNT(*) FROM launch_events WHERE created_at >= ?", now - 86400)
+            out["l7"] = c("SELECT COUNT(*) FROM launch_events WHERE created_at >= ?", now - 7 * 86400)
+            out["l30"] = c("SELECT COUNT(*) FROM launch_events WHERE created_at >= ?", now - 30 * 86400)
+            out["total"] = c("SELECT COUNT(*) FROM launch_events")
+            out["first"] = c("SELECT MIN(created_at) FROM launch_events")
+            month = now - 30 * 86400
+            for key, col in (("by_version", "version"), ("by_os", "os"), ("by_edition", "edition")):
+                out[key] = [
+                    {"k": (k or "?"), "count": n}
+                    for k, n in cur.execute(
+                        f"SELECT {col}, COUNT(*) n FROM launch_events WHERE created_at >= ? "
+                        f"GROUP BY {col} ORDER BY n DESC LIMIT 12", (month,)
+                    ).fetchall()
+                ]
+            today_start = now - (now % 86400)
+            rows = cur.execute(
+                "SELECT created_at - (created_at % 86400) AS d, COUNT(*) FROM launch_events "
+                "WHERE created_at >= ? GROUP BY d", (today_start - 29 * 86400,)
+            ).fetchall()
+            dc = {int(d): n for d, n in rows}
+            for i in range(29, -1, -1):
+                d = today_start - i * 86400
+                out["daily"].append({"date": time.strftime("%Y-%m-%d", time.gmtime(d)), "count": dc.get(d, 0)})
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return out
+
 MAX_CONCURRENT_JOBS = int(os.environ.get("YT_UI_MAX_CONCURRENT", "3"))
 JOB_TTL_SECONDS = int(os.environ.get("YT_UI_JOB_TTL_SECONDS", str(60 * 60)))
 FILE_TTL_DAYS = float(os.environ.get("YT_UI_FILE_TTL_DAYS", "0"))  # 0 = disabled
@@ -284,6 +369,11 @@ DESKTOP_BUILDS_TRIAL_DIR.mkdir(parents=True, exist_ok=True)
 # lost and the download still unlocks.
 KIT_API_KEY = os.environ.get("KIT_API_KEY", "")
 KIT_TRIAL_TAG_ID = os.environ.get("KIT_TRIAL_TAG_ID", "")
+# In-app "subscribe to updates" modal → Kit general form (was urapages form 9446603).
+KIT_SUBSCRIBE_FORM_ID = os.environ.get("KIT_SUBSCRIBE_FORM_ID", "")
+# iOS "Get +media" QR/banner deep link target (Plus Media Player on the App Store).
+IOS_APP_STORE_URL = os.environ.get("IOS_APP_STORE_URL", "https://apps.apple.com/app/id6767406309")
+_SUBSCRIBE_FALLBACK = _data_dir / "subscribe-fallback.jsonl"
 _TRIAL_COOKIE = "trial_unlocked"
 _TRIAL_COOKIE_SIG = hmac.new(
     (TOKEN_INTERNAL_SECRET or "trial-gate").encode(), b"trial-unlocked-v1", "sha256"
@@ -528,6 +618,36 @@ def _record_trial_signup_fallback(email: str):
         line = json.dumps({"email": email, "ts": datetime.utcnow().isoformat()})
         with _trial_lock:
             with open(_TRIAL_SIGNUPS_FALLBACK, "a") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def _kit_subscribe_general(email: str) -> bool:
+    """Add an email to the Kit general 'subscribe to updates' form. Returns True on 2xx.
+    Restores the in-app subscribe modal that used to POST to urapages /api/subscribe."""
+    if not KIT_API_KEY or not KIT_SUBSCRIBE_FORM_ID:
+        return False
+    try:
+        body = json.dumps({"api_key": KIT_API_KEY, "email": email}).encode()
+        req = urllib.request.Request(
+            f"https://api.convertkit.com/v3/forms/{KIT_SUBSCRIBE_FORM_ID}/subscribe",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def _record_subscribe_fallback(email: str, source: str = ""):
+    """Persist an in-app subscribe locally when the Kit call fails — no lead is lost."""
+    try:
+        line = json.dumps({"email": email, "source": source, "ts": datetime.utcnow().isoformat()})
+        with _trial_lock:
+            with open(_SUBSCRIBE_FALLBACK, "a") as f:
                 f.write(line + "\n")
     except Exception:
         pass
@@ -973,6 +1093,23 @@ ADMIN_HTML = """
         <div id="reviews-approved"></div>
       </div>
 
+      <div class="section-head">Desktop Active Installs</div>
+      <div class="stat-grid" id="li-grid"></div>
+      <div class="card">
+        <div class="card-title">Daily Launches &middot; Last 30 Days</div>
+        <div class="chart" id="li-chart"></div>
+      </div>
+      <div class="pv-row">
+        <div class="card">
+          <div class="card-title">By Version &middot; Last 30 Days</div>
+          <div id="li-versions"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">By OS &middot; Last 30 Days</div>
+          <div id="li-os"></div>
+        </div>
+      </div>
+
       <div class="section-head">Page Views</div>
       <div class="stat-grid" id="pv-grid"></div>
       <div class="card">
@@ -1125,6 +1262,7 @@ ADMIN_HTML = """
 
     function renderStats(d) {
       document.getElementById('stats-section').style.display = 'block';
+      renderLaunch(d.launch);
       renderPageviews(d.pageviews);
       renderBuilds(d.builds, d.trial_builds);
       renderReviews(d.pending_reviews, d.approved_reviews, d.review_aggregate);
@@ -1153,6 +1291,44 @@ ADMIN_HTML = """
       if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
       if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
       return Math.floor(diff / 86400) + 'd ago';
+    }
+
+    function barList(items) {
+      items = items || [];
+      var m = 1;
+      items.forEach(function (p) { if (p.count > m) m = p.count; });
+      return items.length
+        ? items.map(function (p) {
+            var w = Math.round((p.count / m) * 100);
+            return '<div class="bar-row"><div class="bar-head">'
+              + '<span class="bp">' + escHtml(p.k) + '</span>'
+              + '<span class="bc">' + p.count + '</span></div>'
+              + '<div class="bar-track"><div class="bar-fill" style="width:' + w + '%"></div></div></div>';
+          }).join('')
+        : '<span style="color:#555;font-size:13px">No launches yet</span>';
+    }
+
+    function renderLaunch(li) {
+      if (!li) return;
+      document.getElementById('li-grid').innerHTML =
+          pvCard('Active Today', li.dau, 'c-green', 'installs pinged in 24h')
+        + pvCard('Launches - 7d', li.l7, 'c-blue', 'app opens, last 7 days')
+        + pvCard('Launches - 30d', li.l30, 'c-amber', 'app opens, last 30 days')
+        + pvCard('Total Pings', li.total, 'c-pink', 'since tracking restored');
+
+      var daily = li.daily || [];
+      var dmax = 1;
+      daily.forEach(function (d) { if (d.count > dmax) dmax = d.count; });
+      document.getElementById('li-chart').innerHTML = daily.map(function (d, i) {
+        var h = Math.round((d.count / dmax) * 100);
+        var lbl = (i % 5 === 0) ? d.date.slice(5) : '&nbsp;';
+        var bar = '<div class="chart-bar" style="height:' + h + '%' + (d.count > 0 ? ';min-height:2px' : '') + '"></div>';
+        return '<div class="chart-col" title="' + d.date + ': ' + d.count + ' launches">'
+          + bar + '<div class="chart-lbl">' + lbl + '</div></div>';
+      }).join('');
+
+      document.getElementById('li-versions').innerHTML = barList(li.by_version);
+      document.getElementById('li-os').innerHTML = barList(li.by_os);
     }
 
     function renderPageviews(pv) {
@@ -2620,7 +2796,7 @@ HTML = r"""
           <span class="ios-eyebrow">New iOS companion</span>
           <h3>+ Media Player</h3>
           <p>Scan with your iPhone to play your synced +downloads library on the go — pairs with the desktop app over Wi-Fi.</p>
-          <a class="ios-btn" href="https://urapages.com/r/ios-qr?s=digitaldownloads-home" target="_blank" rel="noopener noreferrer">Open in App Store &rsaquo;</a>
+          <a class="ios-btn" href="/r/ios-qr?s=digitaldownloads-home" target="_blank" rel="noopener noreferrer">Open in App Store &rsaquo;</a>
         </div>
       </div>
 
@@ -5761,12 +5937,66 @@ def admin_stats():
         "recent": history[-50:][::-1],
         "active_jobs": active_jobs,
         "pageviews": _pageview_analytics(),
+        "launch": _launch_analytics(),
         "builds": _list_desktop_builds(),
         "trial_builds": _list_desktop_builds(DESKTOP_BUILDS_TRIAL_DIR),
         "pending_reviews": pending_reviews(),
         "approved_reviews": approved_reviews(),
         "review_aggregate": review_aggregate(),
     })
+
+
+# ── Desktop / iOS telemetry endpoints ───────────────────────────────────────────
+# Restored after the urapages backend was decommissioned (2026-07-06). Existing
+# desktop installs still call urapages.com/{api/ping,api/subscribe,r/ios-qr}; those
+# hosts are nginx-proxied to this app, so the whole install base is recaptured
+# without a desktop release. New builds call digitaldownloads.space directly.
+def _cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
+
+@app.route("/api/ping", methods=["POST", "OPTIONS"])
+def api_ping():
+    """Anonymous desktop launch ping: {app, version, os, edition}. No PII."""
+    if request.method == "OPTIONS":
+        return _cors(make_response("", 204))
+    d = request.get_json(force=True, silent=True) or {}
+    _record_launch(
+        str(d.get("app") or "")[:64],
+        str(d.get("version") or "")[:32],
+        str(d.get("os") or "")[:64],
+        str(d.get("edition") or "full")[:16],
+        (request.headers.get("User-Agent") or "")[:200],
+    )
+    return _cors(jsonify({"ok": True}))
+
+@app.route("/api/subscribe", methods=["POST", "OPTIONS"])
+def api_subscribe():
+    """In-app 'subscribe to updates' modal → Kit general form. CORS'd because the
+    desktop UI fetches this cross-origin from its localhost page."""
+    if request.method == "OPTIONS":
+        return _cors(make_response("", 204))
+    d = request.get_json(force=True, silent=True) or {}
+    email = (d.get("email") or "").strip()
+    source = str(d.get("source") or "")[:64]
+    if not email or len(email) > 254 or not _EMAIL_RE.match(email):
+        resp = _cors(jsonify({"ok": False, "error": "invalid_email"}))
+        return resp, 400
+    if not _kit_subscribe_general(email):
+        _record_subscribe_fallback(email, source)
+    return _cors(jsonify({"ok": True}))
+
+@app.route("/r/ios-qr")
+def r_ios_qr():
+    """iOS 'Get +media' QR/banner deep link → App Store (records an anonymous scan)."""
+    _record_ios_scan(
+        str(request.args.get("s") or "")[:64],
+        (request.headers.get("User-Agent") or "")[:200],
+    )
+    return redirect(IOS_APP_STORE_URL, code=302)
 
 
 @app.post("/admin/clear-history")
