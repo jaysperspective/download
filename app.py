@@ -473,8 +473,13 @@ def _maybe_delete_build_file(filename: str, manifest: dict, builds_dir: Path = D
         pass
 
 def _detect_os(ua: str) -> str:
-    """Best-effort desktop OS from a User-Agent string. Empty for mobile/unknown."""
+    """Best-effort desktop OS from a User-Agent string. Empty for mobile/unknown.
+    'cros' for ChromeOS — it must be caught before the x11 check below or
+    Chromebooks get steered to the Linux AppImage they can't run; the download
+    pages render a compatibility warning for it instead."""
     ua = (ua or "").lower()
+    if "cros" in ua:
+        return "cros"
     if "windows" in ua:
         return "win"
     if "android" in ua or "iphone" in ua or "ipad" in ua:
@@ -3592,6 +3597,12 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
     @keyframes spin { to { transform: rotate(360deg); } }
     .helper { font-size: 13px; color: #777; margin-top: 22px; line-height: 1.6; }
     .helper a { color: #bf9b3a; }
+    .cros-note {
+      max-width: 400px; margin: 16px auto 4px; padding: 12px 14px; text-align: left;
+      background: rgba(191,155,58,.08); border: 1px solid rgba(191,155,58,.35);
+      border-radius: 10px; font-size: 13px; color: #d8c48a; line-height: 1.6;
+    }
+    .cros-note a { color: #bf9b3a; }
     .back {
       display: inline-block; margin-top: 30px; padding: 10px 18px;
       background: #242222; border: 1px solid #353333; border-radius: 10px;
@@ -3613,6 +3624,9 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
       <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="#48c78e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
     <h1>Purchase confirmed</h1>
+    {% if detected_os == 'cros' %}
+    <div class="cros-note">Heads up &mdash; this looks like a <strong>Chromebook</strong>. +downloads is a desktop app for macOS, Windows and Linux, and ChromeOS can't run any of those installers unless the optional <strong>Linux environment</strong> is turned on (Settings &rarr; About ChromeOS &rarr; Linux development environment). Stuck, or bought by mistake? <a href="mailto:digitalsov2026@gmail.com?subject=Chromebook%20help">Email support</a> &mdash; we'll help you get set up or refund you.</div>
+    {% endif %}
     {% if builds %}
     <p class="sub">Thanks for buying <strong>+downloads for Desktop</strong>. Pick your platform to download the installer.</p>
     <div class="dl-btns">
@@ -3634,6 +3648,9 @@ _DESKTOP_REDEEM_HTML = """<!doctype html>
       <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#48c78e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
     <h1>Download the latest +downloads</h1>
+    {% if detected_os == 'cros' %}
+    <div class="cros-note">Heads up &mdash; this looks like a <strong>Chromebook</strong>. +downloads is a desktop app for macOS, Windows and Linux, and ChromeOS can't run any of those installers unless the optional <strong>Linux environment</strong> is turned on (Settings &rarr; About ChromeOS &rarr; Linux development environment). Need a hand? <a href="mailto:digitalsov2026@gmail.com?subject=Chromebook%20help">Email support</a>.</div>
+    {% endif %}
     {% if builds %}
     <p class="sub">You're an existing customer &mdash; updates are always free. Pick your platform to grab the newest version.</p>
     <div class="dl-btns">
@@ -3807,6 +3824,12 @@ _DESKTOP_TRIAL_HTML = """<!doctype html>
     .upgrade .price { font-size: 13px; color: #777; margin-top: 12px; }
     .helper { font-size: 13px; color: #777; margin-top: 24px; line-height: 1.6; }
     .helper a { color: #bf9b3a; }
+    .cros-note {
+      max-width: 400px; margin: 16px auto 4px; padding: 12px 14px; text-align: left;
+      background: rgba(191,155,58,.08); border: 1px solid rgba(191,155,58,.35);
+      border-radius: 10px; font-size: 13px; color: #d8c48a; line-height: 1.6;
+    }
+    .cros-note a { color: #bf9b3a; }
     .back {
       display: inline-block; margin-top: 28px; padding: 10px 18px;
       background: #242222; border: 1px solid #353333; border-radius: 10px;
@@ -3825,6 +3848,9 @@ _DESKTOP_TRIAL_HTML = """<!doctype html>
   <main class="wrap">
     <span class="badge">Free Trial</span>
     <h1>Try +downloads for Desktop &mdash; free</h1>
+    {% if detected_os == 'cros' %}
+    <div class="cros-note">Heads up &mdash; this looks like a <strong>Chromebook</strong>. +downloads is a desktop app for macOS, Windows and Linux, and ChromeOS can't run any of those installers unless the optional <strong>Linux environment</strong> is turned on (Settings &rarr; About ChromeOS &rarr; Linux development environment).</div>
+    {% endif %}
     {% if unlocked and builds %}
     <p class="sub">You're in &mdash; the free trial downloads from <strong>YouTube</strong> at no cost. Pick your platform to get started.</p>
     <div class="dl-btns">
