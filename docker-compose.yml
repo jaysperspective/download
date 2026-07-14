@@ -37,6 +37,8 @@ services:
       - DESKTOP_BUILDS_TRIAL_DIR=/data/desktop-builds-trial
       - KIT_API_KEY=${KIT_API_KEY}
       - KIT_TRIAL_TAG_ID=${KIT_TRIAL_TAG_ID}
+      - KIT_SUBSCRIBE_FORM_ID=${KIT_SUBSCRIBE_FORM_ID}
+      - IOS_APP_STORE_URL=${IOS_APP_STORE_URL:-https://apps.apple.com/app/id6767406309}
 
 volumes:
   downloads:
