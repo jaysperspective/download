@@ -2190,10 +2190,10 @@ HTML = r"""
     .shot { margin: 0; }
     .shot-frame {
       background: #1c1a1c; border: 1px solid #2e2c2c; border-radius: 14px;
-      aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center;
+      aspect-ratio: 3 / 4; display: flex; align-items: center; justify-content: center;
       overflow: hidden; padding: 10px;
     }
-    .shot-frame img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+    .shot-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .shot figcaption {
       text-align: center; font-size: 13px; color: #999; font-weight: 600; margin-top: 10px;
     }
@@ -2664,20 +2664,20 @@ HTML = r"""
       <div class="shots">
         <span class="shots-label">A look inside the app</span>
         <div class="shot-hero">
-          <img src="/static/shot-app.png" alt="The +downloads desktop app — downloader, music player and video library in one window" width="2000" height="1193" loading="lazy">
+          <img src="/static/shot-app-v4.png" alt="The +downloads desktop app — downloader, video player and music library in one window" width="2000" height="1062" loading="lazy">
         </div>
         <div class="shot-grid">
           <figure class="shot">
-            <div class="shot-frame"><img src="/static/shot-sources.png" alt="Source picker — YouTube, SoundCloud, Spotify, Apple Music" width="680" height="438" loading="lazy"></div>
-            <figcaption>Download from any source</figcaption>
+            <div class="shot-frame"><img src="/static/shot-download-v4.png" alt="Download from YouTube or SoundCloud — paste a link or search by name" width="814" height="910" loading="lazy"></div>
+            <figcaption>Paste a link, or search by name</figcaption>
           </figure>
           <figure class="shot">
-            <div class="shot-frame"><img src="/static/shot-video.jpg" alt="Built-in video player and searchable library" width="1100" height="992" loading="lazy"></div>
-            <figcaption>Watch &amp; organize your library</figcaption>
+            <div class="shot-frame"><img src="/static/shot-music-v4.png" alt="Built-in music player with synced lyrics, queue and loudness normalization" width="580" height="773" loading="lazy"></div>
+            <figcaption>Music player with synced lyrics</figcaption>
           </figure>
           <figure class="shot">
-            <div class="shot-frame"><img src="/static/shot-music.png" alt="Music player with Burn-a-CD queue" width="688" height="1128" loading="lazy"></div>
-            <figcaption>Music player &amp; CD burning</figcaption>
+            <div class="shot-frame"><img src="/static/shot-cd-v4.png" alt="Burn and rip CDs (beta) and pair the +media iOS companion" width="704" height="939" loading="lazy"></div>
+            <figcaption>Burn &amp; rip CDs (beta)</figcaption>
           </figure>
         </div>
       </div>
