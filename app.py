@@ -2798,7 +2798,7 @@ HTML = r"""
   <header class="header">
     <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
     <nav class="nav">
-      <button class="nav-link" onclick="document.getElementById('downloader').scrollIntoView({behavior:'smooth',block:'center'})">Online</button>
+      <a href="/web">Web</a>
       <a href="#features">Features</a>
       <a href="#faq">FAQ</a>
       <a href="/troubleshooting">Help</a>
@@ -3262,120 +3262,13 @@ HTML = r"""
   <!-- ─── HERO ─────────────────────────────────────────── -->
   <section class="hero">
     <div class="hero-inner">
-      <span class="hero-eyebrow">Online · Free for token-holders</span>
+      <span class="hero-eyebrow">Web app · free on iPhone &amp; iPad</span>
       <h1 class="hero-title">Save anything you can <span class="grad">stream</span>.</h1>
-      <p class="hero-sub">YouTube, Spotify, Apple Music, SoundCloud and more. Paste a link, get the file — right here, or grab the desktop app for unlimited downloads.</p>
+      <p class="hero-sub">Download from YouTube, Spotify, Apple Music and SoundCloud straight to your phone — free. Or get the desktop app for unlimited downloads and video.</p>
 
-      <!-- Downloader card -->
-      <div id="downloader" class="downloader">
-        <div class="paused-banner" id="paused-banner">
-          <h2>Online tool temporarily offline</h2>
-          <p>We're sorting out an upstream issue with our YouTube downloader. The <strong>+downloads desktop app</strong> runs entirely on your own machine and isn't affected &mdash; try it free for 7 days, or grab the full version for $1.99.</p>
-          <a class="btn-get-app" href="/desktop/buy">Get the Desktop App</a>
-        </div>
-
-        <div class="url-row">
-          <input id="url" type="text" placeholder="Paste a YouTube, Spotify, Apple Music or SoundCloud URL" autocomplete="off" spellcheck="false" />
-          <button id="btnInsertToken" class="btn-primary btn-token" onclick="onInsertToken()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 11V8a5 5 0 0110 0v3M5 11h14v9H5v-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Insert Token
-          </button>
-          <button id="btnDownload" class="btn-primary" onclick="start()" style="display:none;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Download
-          </button>
-        </div>
-        <div class="type-row">
-          <select id="type">
-            <option value="video">Video (MP4)</option>
-            <option value="audio">Audio (MP3)</option>
-            <option value="soundcloud">SoundCloud</option>
-            <option value="spotify">Spotify</option>
-            <option value="apple_music">Apple Music</option>
-          </select>
-        </div>
-        <div id="scOptions">
-          <label>Format:
-            <select id="scQuality">
-              <option value="m4a">m4a (Best, default)</option>
-              <option value="mp3">mp3 (Compatible)</option>
-            </select>
-          </label>
-          <label><input type="checkbox" id="scPlaylist" checked> Download playlists/sets</label>
-        </div>
-        <div id="spNote" class="note-pill">Spotify tracks are matched to YouTube and downloaded as MP3.</div>
-        <div id="amNote" class="note-pill">Apple Music songs and albums are matched to YouTube and downloaded as MP3. Playlists are not supported.</div>
-
-        <div class="token-area">
-          <div id="token-input-row">
-            <input id="token-field" type="text" placeholder="Paste your access token" autocomplete="off" spellcheck="false"
-              onkeydown="if(event.key==='Enter')unlockWithToken()" />
-            <button id="token-submit-btn" onclick="unlockWithToken()">Unlock</button>
-          </div>
-          <div id="token-error"></div>
-          <div id="token-unlocked">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="rgba(72,199,142,0.15)"/><path d="M8 12l3 3 5-6" stroke="#48c78e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span class="lab">Access token active</span>
-            <span id="token-remaining"></span>
-            <button onclick="clearToken()">Remove</button>
-          </div>
-        </div>
-
-        <!-- status / progress -->
-        <div id="statusBlock" class="status-block">
-          <div class="status-row">
-            <span id="statusPill">idle</span>
-            <span id="queuePos"></span>
-            <button onclick="cancel()" id="cancelBtn" class="btn-cancel" style="display:none;">Cancel</button>
-          </div>
-          <div id="progressWrap">
-            <div id="progressTrack"><div id="progressBar"></div><div id="progressLabel"></div></div>
-            <small id="progressText"></small>
-          </div>
-          <div id="phase" class="phase-label">Idle…</div>
-          <div id="phaseNote" class="phase-note"></div>
-          <pre id="log"></pre>
-          <div id="meta"></div>
-        </div>
-      </div>
-
-      <!-- Token purchase options under the URL box.
-           Both cards are grayed-out + click-intercepted while the online
-           downloader is hard-paused (June 2026, upstream proxy quota).
-           Restore by removing the `offline` class + onclick, and reverting
-           the section label to "Buy a token to use it online". -->
-      <div class="token-buy-wrap">
-        <div class="token-buy-label">Online tool &mdash; temporarily offline</div>
-        <div class="token-buy-grid">
-          <a class="token-buy offline" href="#" onclick="showOnlineOfflineModal(); return false;" aria-disabled="true">
-            <span class="offline-pill">Offline</span>
-            <div class="price">$1</div>
-            <div class="qty">3 downloads</div>
-            <div class="sub">Delivered instantly via email. Try it once, no account needed.</div>
-            <div class="arrow">Buy 3-pack &rarr;</div>
-          </a>
-          <a class="token-buy alt offline" href="#" onclick="showOnlineOfflineModal(); return false;" aria-disabled="true">
-            <span class="offline-pill">Offline</span>
-            <span class="tag">Best value</span>
-            <div class="price">$5</div>
-            <div class="qty">10 downloads</div>
-            <div class="sub">Save 33% vs the 3-pack. Same instant delivery.</div>
-            <div class="arrow">Buy 10-pack &rarr;</div>
-          </a>
-        </div>
-      </div>
-
-      <!-- Online-offline explainer modal -->
-      <div class="oo-overlay" id="onlineOfflineOverlay" onclick="if(event.target===this) hideOnlineOfflineModal();">
-        <div class="oo-card" role="dialog" aria-labelledby="ooTitle">
-          <h2 id="ooTitle">Online tool is temporarily offline</h2>
-          <p>We're sorting out an upstream issue with our YouTube downloader. <strong>The +downloads desktop app runs entirely on your own machine</strong> &mdash; it doesn't share this limitation and works on every supported site.</p>
-          <div class="oo-actions">
-            <a class="oo-primary" href="/trial">Try +downloads free &rarr;</a>
-            <a class="oo-secondary" href="/desktop/buy">Buy +downloads &middot; $1.99</a>
-          </div>
-          <button class="oo-dismiss" onclick="hideOnlineOfflineModal()">Close</button>
-        </div>
+      <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:28px;">
+        <a href="/web" style="display:inline-flex; align-items:center; gap:8px; padding:14px 30px; background:#db52a6; color:#fff; font-size:15px; font-weight:700; border-radius:10px; text-decoration:none;">Open the web app &rarr;</a>
+        <a href="/desktop/buy" style="display:inline-flex; align-items:center; gap:8px; padding:14px 30px; background:transparent; border:1px solid #2e2c2c; color:#f0eef0; font-size:15px; font-weight:700; border-radius:10px; text-decoration:none;">Get the desktop app &middot; $1.99</a>
       </div>
     </div>
   </section>
@@ -3547,7 +3440,6 @@ async function checkPaused() {
   } catch (e) {}
 }
 
-validateStoredToken().then(() => checkPaused());
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -3561,8 +3453,6 @@ function syncScOptions() {
   document.getElementById('spNote').style.display = t === 'spotify' ? 'block' : 'none';
   document.getElementById('amNote').style.display = t === 'apple_music' ? 'block' : 'none';
 }
-document.getElementById('type').addEventListener('change', syncScOptions);
-syncScOptions();
 
 function renderPhase(phase, note, tail) {
   const phEl = document.getElementById('phase');
