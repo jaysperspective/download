@@ -811,6 +811,16 @@ def _init_users_db():
             "created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, "
             "used INTEGER NOT NULL DEFAULT 0)"
         )
+        # Analytics for the /web app — one row per tracked action. Powers the
+        # admin "Web App" tab. event: signup|login|download|cap_hit|handoff_claimed|error.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS web_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL, "
+            "platform TEXT, fmt TEXT, source TEXT, detail TEXT, "
+            "user_id INTEGER, created_at INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_web_events_created ON web_events(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_web_events_event ON web_events(event)")
 
 
 _init_users_db()
@@ -925,6 +935,43 @@ def _bump_usage(user_id: int):
             "ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1",
             (user_id, day),
         )
+
+
+def _web_platform() -> str:
+    ua = (request.headers.get("User-Agent") or "").lower()
+    if any(x in ua for x in ("iphone", "ipad", "ipod")):
+        return "ios"
+    if "android" in ua:
+        return "android"
+    if any(x in ua for x in ("windows", "macintosh", "mac os", "cros", "linux")):
+        return "desktop"
+    return "other"
+
+
+def _web_source(url: str) -> str:
+    h = (urlparse(url or "").hostname or "").lower()
+    if "youtu" in h:
+        return "youtube"
+    if "soundcloud" in h:
+        return "soundcloud"
+    if "spotify" in h:
+        return "spotify"
+    if "apple" in h:
+        return "apple"
+    return "other" if h else "unknown"
+
+
+def _web_event(event, user_id=None, platform=None, fmt=None, source=None, detail=None):
+    """Record one /web analytics row. Best-effort — never breaks a request."""
+    try:
+        with _users_lock, _users_conn() as conn:
+            conn.execute(
+                "INSERT INTO web_events (event, platform, fmt, source, detail, user_id, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (event, platform, fmt, source, detail, user_id, int(time.time())),
+            )
+    except Exception:
+        pass
 
 
 def _set_web_cookie(resp, token: str):
@@ -1273,6 +1320,21 @@ ADMIN_HTML = """
       .url-cell { max-width: 140px; }
       .pv-row { grid-template-columns: 1fr; }
     }
+    .admintabs { display:flex; gap:8px; margin:0 0 18px; }
+    .admintab { background:#242222; border:1px solid #2e2c2c; color:#aaa; padding:9px 16px; border-radius:9px; font-weight:600; font-size:14px; cursor:pointer; }
+    .admintab.active { background:#db52a6; border-color:#db52a6; color:#fff; }
+    .wstat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:6px; }
+    .wstat { background:#1e1c1c; border:1px solid #2e2c2c; border-radius:10px; padding:14px; }
+    .wstat .n { font-size:24px; font-weight:800; color:#f0eef0; }
+    .wstat .l { font-size:12px; color:#888; margin-top:2px; }
+    .wbar { display:grid; grid-template-columns:100px 1fr 46px; align-items:center; gap:10px; font-size:13px; color:#ccc; margin:7px 0; }
+    .wbar .track { height:8px; background:#242222; border-radius:99px; overflow:hidden; }
+    .wbar .fill { height:100%; background:#db52a6; }
+    .wbar .v { text-align:right; color:#f0eef0; font-weight:700; }
+    .wday { display:flex; align-items:flex-end; gap:3px; height:60px; margin-top:8px; }
+    .wday .c { flex:1; background:#db52a6; border-radius:2px 2px 0 0; min-height:2px; }
+    .wrecent .row { display:grid; grid-template-columns:120px 64px 1fr auto; gap:8px; padding:5px 0; border-top:1px solid #2e2c2c; color:#bbb; font-size:13px; }
+    @media (max-width:600px){ .wstat-grid{ grid-template-columns:repeat(2,1fr);} .wrecent .row{ grid-template-columns:1fr auto;} }
   </style>
 </head>
 <body>
@@ -1298,7 +1360,19 @@ ADMIN_HTML = """
       <div id="upload-msg" style="margin-top:10px"></div>
     </div>
 
-    <div class="card">
+    <div class="admintabs">
+      <button class="admintab active" id="tab-btn-overview" onclick="showTab('overview')">Overview</button>
+      <button class="admintab" id="tab-btn-webapp" onclick="showTab('webapp')">Web App</button>
+    </div>
+
+    <div id="tab-webapp" style="display:none">
+      <div class="refresh-row">
+        <button class="refresh-btn" onclick="loadWebStats()">&#8635; Refresh</button>
+      </div>
+      <div id="webstats"><div class="wstat .l" style="color:#888">Enter the password above, then this loads automatically.</div></div>
+    </div>
+
+    <div class="card" id="svc-card">
       <div class="card-title">Service Control</div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <div id="pause-status" style="font-size:14px;font-weight:600;color:#888">Status: unknown</div>
@@ -1493,6 +1567,74 @@ ADMIN_HTML = """
         }
       } catch (e) { msg.textContent = 'Network error.'; msg.className = 'err'; }
       finally { btn.disabled = false; btn.textContent = 'Upload'; }
+    }
+
+    function showTab(name) {
+      var web = name === 'webapp';
+      document.getElementById('svc-card').style.display = web ? 'none' : '';
+      document.getElementById('stats-section').style.display = web ? 'none' : '';
+      document.getElementById('tab-webapp').style.display = web ? '' : 'none';
+      document.getElementById('tab-btn-overview').classList.toggle('active', !web);
+      document.getElementById('tab-btn-webapp').classList.toggle('active', web);
+      if (web) loadWebStats();
+    }
+
+    function wsGrid(items) {
+      return '<div class="wstat-grid">' + items.map(function(it){
+        return '<div class="wstat"><div class="n">' + it[1] + '</div><div class="l">' + it[0] + '</div></div>';
+      }).join('') + '</div>';
+    }
+    function wsBars(obj) {
+      var keys = Object.keys(obj || {});
+      if (!keys.length) return '<div class="l" style="color:#666">no data yet</div>';
+      var max = Math.max.apply(null, keys.map(function(k){ return obj[k]; }));
+      return keys.sort(function(a,b){ return obj[b]-obj[a]; }).map(function(k){
+        var pct = max ? Math.round(obj[k]/max*100) : 0;
+        return '<div class="wbar"><span>' + k + '</span><span class="track"><span class="fill" style="width:' + pct + '%"></span></span><span class="v">' + obj[k] + '</span></div>';
+      }).join('');
+    }
+    function renderWebStats(d) {
+      var u = d.users||{}, lib = d.library||{}, dl = d.downloads||{}, act = d.activity_7d||{};
+      var daily = dl.daily||[];
+      var dmax = daily.reduce(function(m,x){ return Math.max(m, x.count); }, 0);
+      var dayBars = daily.map(function(x){
+        var h = dmax ? Math.round(x.count/dmax*100) : 0;
+        return '<div class="c" style="height:' + h + '%" title="' + x.day + ': ' + x.count + '"></div>';
+      }).join('');
+      var recent = (d.recent||[]).map(function(r){
+        var t = new Date(r.created_at*1000).toLocaleString();
+        var meta = [r.fmt, r.source, r.detail].filter(Boolean).join(' / ');
+        return '<div class="row"><span>' + r.event + '</span><span>' + (r.platform||'') + '</span><span>' + meta + '</span><span>' + t + '</span></div>';
+      }).join('');
+      return ''
+        + '<div class="card"><div class="card-title">Accounts</div>'
+        +   wsGrid([['Total users', u.total||0], ['New (7d)', u.new_7d||0], ['New (30d)', u.new_30d||0], ['Active (7d)', u.active_7d||0]])
+        + '</div>'
+        + '<div class="card"><div class="card-title">Downloads</div>'
+        +   wsGrid([['Total', dl.total||0], ['Today', dl.today||0], ['Last 7d', dl.last_7d||0], ['Last 30d', dl.last_30d||0]])
+        +   '<div class="wday">' + dayBars + '</div><div class="l" style="margin-top:4px">downloads/day (last 30 days)</div>'
+        +   '<div style="margin-top:14px"><div class="l" style="margin-bottom:4px">By platform</div>' + wsBars(dl.by_platform) + '</div>'
+        +   '<div style="margin-top:12px"><div class="l" style="margin-bottom:4px">By format</div>' + wsBars(dl.by_format) + '</div>'
+        +   '<div style="margin-top:12px"><div class="l" style="margin-bottom:4px">By source</div>' + wsBars(dl.by_source) + '</div>'
+        + '</div>'
+        + '<div class="card"><div class="card-title">Library</div>'
+        +   wsGrid([['Saved items', lib.total_items||0], ['Users w/ library', lib.users_with_items||0], ['Avg / user', lib.avg_per_user||0], ['Hit cap today', d.today_cap_hitters||0]])
+        + '</div>'
+        + '<div class="card"><div class="card-title">Activity (7 days)</div>'
+        +   wsGrid([['Signups', act.signup||0], ['Logins', act.login||0], ['Downloads', act.download||0], ['+media pulls', act.handoff_claimed||0]])
+        +   '<div class="l" style="margin-top:10px">Cap hits: <b style="color:#f0eef0">' + (act.cap_hit||0) + '</b> &nbsp; Errors: <b style="color:#f0eef0">' + (act.error||0) + '</b></div>'
+        + '</div>'
+        + '<div class="card"><div class="card-title">Recent activity</div><div class="wrecent">' + (recent || '<div class="l">no events yet</div>') + '</div></div>';
+    }
+    async function loadWebStats() {
+      var pw = document.getElementById('pw').value;
+      var el = document.getElementById('webstats');
+      el.innerHTML = 'Loading&hellip;';
+      try {
+        var r = await fetch('/admin/web-stats', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ password: pw }) });
+        if (!r.ok) { el.innerHTML = '<div class="l" style="color:#ff6b6b">Error ' + r.status + ' &mdash; check the password above.</div>'; return; }
+        el.innerHTML = renderWebStats(await r.json());
+      } catch (e) { el.innerHTML = '<div class="l" style="color:#ff6b6b">Failed to load.</div>'; }
     }
 
     async function loadStats() {
@@ -6322,6 +6464,65 @@ def r_ios_qr():
     return redirect(IOS_APP_STORE_URL, code=302)
 
 
+def _web_app_stats():
+    """Aggregate every /web data point for the admin Web App tab."""
+    now = int(time.time())
+    d7, d30 = now - 7 * 86400, now - 30 * 86400
+    today0 = now - (now % 86400)  # midnight UTC today
+    out = {"generated_at": now}
+    with _users_lock, _users_conn() as conn:
+        def scalar(q, args=()):
+            r = conn.execute(q, args).fetchone()
+            return r[0] if r and r[0] is not None else 0
+
+        out["users"] = {
+            "total": scalar("SELECT COUNT(*) FROM users"),
+            "new_7d": scalar("SELECT COUNT(*) FROM users WHERE created_at >= ?", (d7,)),
+            "new_30d": scalar("SELECT COUNT(*) FROM users WHERE created_at >= ?", (d30,)),
+            "active_7d": scalar("SELECT COUNT(DISTINCT user_id) FROM sessions WHERE last_seen >= ?", (d7,)),
+            "active_30d": scalar("SELECT COUNT(DISTINCT user_id) FROM sessions WHERE last_seen >= ?", (d30,)),
+        }
+        total_items = scalar("SELECT COUNT(*) FROM library_items")
+        with_items = scalar("SELECT COUNT(DISTINCT user_id) FROM library_items")
+        out["library"] = {
+            "total_items": total_items,
+            "users_with_items": with_items,
+            "avg_per_user": round(total_items / with_items, 1) if with_items else 0,
+        }
+        out["downloads"] = {
+            "total": scalar("SELECT COUNT(*) FROM web_events WHERE event='download'"),
+            "today": scalar("SELECT COUNT(*) FROM web_events WHERE event='download' AND created_at >= ?", (today0,)),
+            "last_7d": scalar("SELECT COUNT(*) FROM web_events WHERE event='download' AND created_at >= ?", (d7,)),
+            "last_30d": scalar("SELECT COUNT(*) FROM web_events WHERE event='download' AND created_at >= ?", (d30,)),
+            "by_platform": {(r[0] or "unknown"): r[1] for r in conn.execute("SELECT platform, COUNT(*) FROM web_events WHERE event='download' GROUP BY platform")},
+            "by_format": {(r[0] or "unknown"): r[1] for r in conn.execute("SELECT fmt, COUNT(*) FROM web_events WHERE event='download' GROUP BY fmt")},
+            "by_source": {(r[0] or "unknown"): r[1] for r in conn.execute("SELECT source, COUNT(*) FROM web_events WHERE event='download' GROUP BY source")},
+            "daily": [{"day": r[0], "count": r[1]} for r in conn.execute(
+                "SELECT date(created_at,'unixepoch') d, COUNT(*) FROM web_events WHERE event='download' AND created_at >= ? GROUP BY d ORDER BY d", (d30,))],
+        }
+        out["activity_7d"] = {r[0]: r[1] for r in conn.execute(
+            "SELECT event, COUNT(*) FROM web_events WHERE created_at >= ? GROUP BY event", (d7,))}
+        day = datetime.utcnow().strftime("%Y-%m-%d")
+        out["today_cap_hitters"] = scalar(
+            "SELECT COUNT(*) FROM usage WHERE day=? AND count >= ?", (day, WEB_TIER_LIMITS["free"]["daily"]))
+        out["recent"] = [
+            {"event": r[0], "platform": r[1], "fmt": r[2], "source": r[3], "detail": r[4], "created_at": r[5]}
+            for r in conn.execute(
+                "SELECT event, platform, fmt, source, detail, created_at FROM web_events ORDER BY id DESC LIMIT 25")
+        ]
+    return out
+
+
+@app.post("/admin/web-stats")
+def admin_web_stats():
+    if not COOKIES_PASSWORD:
+        abort(503)
+    data = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+        return jsonify({"error": "Invalid password"}), 403
+    return jsonify(_web_app_stats())
+
+
 @app.post("/admin/clear-history")
 def admin_clear_history():
     if not COOKIES_PASSWORD:
@@ -6479,7 +6680,7 @@ WEB_HTML = r"""<!doctype html>
   .tour-sub{ color:var(--mut); margin:0 0 16px; font-size:15px; }
   .feat{ display:grid; gap:10px; margin-bottom:14px; }
   .fcard{ display:flex; gap:12px; align-items:flex-start; background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:12px 14px; }
-  .fi{ font-size:22px; line-height:1; }
+  .fi{ width:8px; height:8px; border-radius:3px; background:var(--pink); margin-top:7px; flex:0 0 auto; }
   .fcard b{ display:block; font-size:15px; margin-bottom:1px; }
   .fcard span{ color:var(--mut); font-size:13px; }
   .peek{ background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:12px 14px; margin-bottom:18px; }
@@ -6509,9 +6710,9 @@ WEB_HTML = r"""<!doctype html>
       <h1 class="tour-h">Your music. On every device.</h1>
       <p class="tour-sub">Paste a link, download straight to your device, and build a library that follows you everywhere. Free &mdash; 10 downloads a day.</p>
       <div class="feat">
-        <div class="fcard"><div class="fi">&#11015;&#65039;</div><div><b>Download anything</b><span>YouTube, SoundCloud, Spotify, Apple Music &mdash; audio or video.</span></div></div>
-        <div class="fcard"><div class="fi">&#128218;</div><div><b>A library that follows you</b><span>Covers, artists and playlists, synced across your devices.</span></div></div>
-        <div class="fcard"><div class="fi">&#128241;</div><div><b>Plays offline in +media</b><span>Files land on your phone and play without a connection.</span></div></div>
+        <div class="fcard"><div class="fi"></div><div><b>Download anything</b><span>YouTube, SoundCloud, Spotify, Apple Music &mdash; audio or video.</span></div></div>
+        <div class="fcard"><div class="fi"></div><div><b>A library that follows you</b><span>Covers, artists and playlists, synced across your devices.</span></div></div>
+        <div class="fcard"><div class="fi"></div><div><b>Plays offline in +media</b><span>Files land on your phone and play without a connection.</span></div></div>
       </div>
       <div class="peek">
         <div class="peek-label">a peek inside your library</div>
@@ -6826,6 +7027,7 @@ def web_signup():
     uid, err = _create_user(data.get("email", ""), data.get("password", ""))
     if err:
         return jsonify({"error": err}), 400
+    _web_event("signup", user_id=uid, platform=_web_platform())
     token = _create_session(uid)
     return _set_web_cookie(make_response(jsonify({"ok": True, "token": token})), token)
 
@@ -6836,6 +7038,7 @@ def web_login():
     uid = _verify_login(data.get("email", ""), data.get("password", ""))
     if not uid:
         return jsonify({"error": "Wrong email or password."}), 401
+    _web_event("login", user_id=uid, platform=_web_platform())
     token = _create_session(uid)
     return _set_web_cookie(make_response(jsonify({"ok": True, "token": token})), token)
 
@@ -6996,6 +7199,7 @@ def web_start():
             "message": "Video downloads are a Pro feature. Upgrade to download video, or switch to Audio (MP3).",
         }), 402
     if _usage_today(user["id"]) >= lim["daily"]:
+        _web_event("cap_hit", user_id=user["id"], platform=_web_platform())
         return jsonify({
             "error": "daily_limit",
             "message": "You've hit today's limit of %d downloads. Upgrade for more, or come back tomorrow." % lim["daily"],
@@ -7068,6 +7272,8 @@ def web_start():
             job_queue.append(job_id)
         queue_cv.notify()
     _bump_usage(user["id"])
+    _web_event("download", user_id=user["id"], platform=_web_platform(),
+               fmt=("video" if job_type == "video" else "audio"), source=_web_source(url))
     return jsonify({
         "job_id": job_id, "status": "queued",
         "used_today": _usage_today(user["id"]), "daily_limit": lim["daily"],
@@ -7171,6 +7377,7 @@ def web_handoff_get(hid):
         rec = _web_handoffs.pop(hid, None)
     if not rec or rec[0] < now:
         return jsonify({"error": "expired"}), 404
+    _web_event("handoff_claimed", platform="ios")
     return jsonify(rec[1])
 
 
@@ -7205,6 +7412,7 @@ def web_resolve():
         return jsonify({"error": "upgrade_required",
                         "message": "Video downloads are a Pro feature. Upgrade, or switch to Audio."}), 402
     if _usage_today(user["id"]) >= lim["daily"]:
+        _web_event("cap_hit", user_id=user["id"], platform=_web_platform())
         return jsonify({"error": "daily_limit",
                         "message": "You've hit today's limit of %d downloads." % lim["daily"]}), 429
 
@@ -7213,6 +7421,8 @@ def web_resolve():
     else:
         info = _resolve_direct(url, "140", ["android_vr", "tv", "mweb"])
     if not info.get("ok"):
+        _web_event("error", user_id=user["id"], platform=_web_platform(),
+                   source=_web_source(url), detail="resolve_failed")
         return jsonify({"error": "resolve_failed",
                         "message": "Couldn't get a direct link — try again, or use the standard download."}), 502
 
@@ -7222,6 +7432,8 @@ def web_resolve():
                         "message": "That's longer than the %d-minute limit on your plan." % (maxd // 60)}), 402
 
     _bump_usage(user["id"])
+    _web_event("download", user_id=user["id"], platform=_web_platform(),
+               fmt=("video" if want_video else "audio"), source=_web_source(url))
     # Stash a handoff so the mobile web can open the download in +media by id
     # (space-digitaldownloads://download?h=<id>) without a long deep-link URL.
     handoff_id = _create_handoff({
