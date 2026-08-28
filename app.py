@@ -23,8 +23,11 @@ import tempfile
 import shutil
 import sqlite3
 import smtplib
+import hashlib
+import secrets
 from email.mime.text import MIMEText
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
@@ -709,6 +712,309 @@ def _release_ip(ip: str):
             _ip_jobs_active.pop(ip, None)
         else:
             _ip_jobs_active[ip] = current - 1
+
+
+# --- /web edition: user accounts, library index, and subscription tiers -----
+# A separate SQLite db (users.db) backs the new mobile-first /web app: real
+# accounts (so a saved library follows the user across devices), an audio-less
+# "library index" (metadata only — the actual files live on the user's device,
+# never here), and a per-day usage counter that enforces the free-tier cap.
+# Kept in its own db file, mirroring analytics.db / reviews.db, so nothing here
+# is touched by their prunes. Subscription state is a LOCAL CACHE only — once
+# the payment app grows a /subscription/check endpoint it becomes the source of
+# truth (repo 2), read via _web_user_tier().
+USERS_DB = _data_dir / "users.db"
+_users_lock = threading.Lock()
+
+# Free splits from paid on the two things that actually cost us: queue time
+# (the priority lane) and bandwidth (daily count + per-file size/length caps).
+# max_duration is seconds, max_filesize is a yt-dlp size string; 0/"0" = no cap.
+# No subscription yet: everyone is on "free", which for now unlocks the full
+# feature set (audio + video) with a 10/download-per-day safety cap. The "pro"
+# tier is kept for when billing lands (priority lane etc.), but nothing grants it.
+WEB_TIER_LIMITS = {
+    "free": {"daily": 10,  "max_duration": 0, "max_filesize": "0", "priority": False, "allow_video": True},
+    "pro":  {"daily": 500, "max_duration": 0, "max_filesize": "0", "priority": True,  "allow_video": True},
+}
+WEB_SESSION_COOKIE = "web_session"
+WEB_SESSION_TTL_DAYS = 90
+# Passwordless "email me a sign-in link" flow. SMTP is blocked on the droplet, so
+# delivery goes over HTTPS via Resend when RESEND_API_KEY is set; otherwise the
+# link is logged (and, in dev only, echoed in the response — WEB_MAGIC_LINK_ECHO).
+WEB_MAGIC_TTL_MIN = 15
+WEB_MAGIC_ECHO = os.environ.get("WEB_MAGIC_LINK_ECHO", "") == "1"
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+WEB_MAIL_FROM = os.environ.get("WEB_MAIL_FROM", "+downloads <login@digitaldownloads.space>")
+# DEV ONLY: when WEB_DEV_AUTOLOGIN=1, unauthenticated /web requests resolve to a
+# fixed account so you can skip the sign-in screen while iterating. Never set this
+# in production — it disables the login gate for everyone.
+WEB_DEV_AUTOLOGIN = os.environ.get("WEB_DEV_AUTOLOGIN", "") == "1"
+WEB_DEV_USER_EMAIL = os.environ.get("WEB_DEV_USER_EMAIL", "dev@example.com")
+# DEV ONLY: /web/dev/* tools (e.g. the googlevideo portability tester). 404 unless set.
+WEB_DEV_TOOLS = os.environ.get("WEB_DEV_TOOLS", "") == "1"
+DEV_TEST_VIDEOS = [
+    ("dQw4w9WgXcQ", "Rick Astley — Never Gonna Give You Up"),
+    ("9bZkp7q19f0", "PSY — Gangnam Style"),
+    ("kJQP7kiw5Fk", "Luis Fonsi — Despacito"),
+    ("OPf0YbXqDm0", "Mark Ronson — Uptown Funk"),
+    ("JGwWNGJdvx8", "Ed Sheeran — Shape of You"),
+    ("60ItHLz5WEA", "Alan Walker — Faded"),
+]
+# Reuse the online tool's adult-domain blocklist for /web too. Defined here as a
+# module constant so /web/start doesn't duplicate the literal set.
+_WEB_BLOCKED_DOMAINS = {
+    "pornhub", "xvideos", "xnxx", "xhamster", "redtube", "youporn",
+    "tube8", "spankbang", "eporner", "tnaflix", "drtuber", "sunporno",
+    "txxx", "hdzog", "hclips", "porntrex", "fuq", "beeg", "porn",
+    "xxxbunker", "4tube", "porntube", "slutload", "motherless",
+    "heavy-r", "efukt", "bestgore", "theync", "crazyshit",
+    "anyporn", "nuvid", "pornone", "sexvid", "empflix", "porndig",
+    "alohatube", "pornoxo", "3movs", "ashemaletube", "trannytube",
+    "shemalestube", "chaturbate", "stripchat", "bongacams", "cam4",
+    "livejasmin", "myfreecams", "camsoda", "onlyfans",
+}
+
+
+def _users_conn():
+    return sqlite3.connect(USERS_DB, timeout=5)
+
+
+def _init_users_db():
+    with _users_lock, _users_conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS users ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "email TEXT UNIQUE NOT NULL, pw_hash TEXT NOT NULL, "
+            "tier TEXT NOT NULL DEFAULT 'free', created_at INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, "
+            "created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS usage ("
+            "user_id INTEGER NOT NULL, day TEXT NOT NULL, "
+            "count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, day))"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS library_items ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+            "source_url TEXT NOT NULL, title TEXT, artist TEXT, cover_url TEXT, "
+            "tags TEXT, playlist TEXT, added_at INTEGER NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_library_user ON library_items(user_id, added_at)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS magic_links ("
+            "token_hash TEXT PRIMARY KEY, email TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, "
+            "used INTEGER NOT NULL DEFAULT 0)"
+        )
+
+
+_init_users_db()
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+def _create_user(email: str, password: str):
+    """Returns (user_id, error). Email normalised lowercase; password hashed."""
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return None, "Enter a valid email address."
+    if len(password or "") < 8:
+        return None, "Password must be at least 8 characters."
+    pw_hash = generate_password_hash(password, method="pbkdf2:sha256")
+    now = int(time.time())
+    try:
+        with _users_lock, _users_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO users (email, pw_hash, tier, created_at) VALUES (?,?,?,?)",
+                (email, pw_hash, "free", now),
+            )
+            return cur.lastrowid, None
+    except sqlite3.IntegrityError:
+        return None, "An account with that email already exists."
+    except Exception:
+        return None, "Could not create the account. Try again."
+
+
+def _verify_login(email: str, password: str):
+    email = (email or "").strip().lower()
+    with _users_lock, _users_conn() as conn:
+        row = conn.execute("SELECT id, pw_hash FROM users WHERE email=?", (email,)).fetchone()
+    if not row or not check_password_hash(row[1], password or ""):
+        return None
+    return row[0]
+
+
+def _create_session(user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    with _users_lock, _users_conn() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token_hash, user_id, created_at, last_seen) VALUES (?,?,?,?)",
+            (_hash_token(token), user_id, now, now),
+        )
+    return token
+
+
+def _destroy_session(token: str):
+    if not token:
+        return
+    with _users_lock, _users_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE token_hash=?", (_hash_token(token),))
+
+
+def _session_token_from_request(req) -> str:
+    auth = req.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return req.cookies.get(WEB_SESSION_COOKIE, "") or ""
+
+
+def _current_web_user(req):
+    """Resolve the logged-in /web user from a Bearer token (the iOS app) or the
+    session cookie (browser). Returns a dict or None; expires stale sessions.
+    Falls back to a fixed dev account when WEB_DEV_AUTOLOGIN is set."""
+    token = _session_token_from_request(req)
+    if token:
+        thash = _hash_token(token)
+        cutoff = int(time.time()) - WEB_SESSION_TTL_DAYS * 86400
+        with _users_lock, _users_conn() as conn:
+            row = conn.execute(
+                "SELECT s.user_id, s.created_at, u.email, u.tier "
+                "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash=?",
+                (thash,),
+            ).fetchone()
+            if row and row[1] >= cutoff:
+                conn.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", (int(time.time()), thash))
+                return {"id": row[0], "email": row[2], "tier": row[3]}
+            if row:
+                conn.execute("DELETE FROM sessions WHERE token_hash=?", (thash,))
+    if WEB_DEV_AUTOLOGIN:
+        uid = _find_or_create_user_by_email(WEB_DEV_USER_EMAIL)
+        with _users_lock, _users_conn() as conn:
+            trow = conn.execute("SELECT tier FROM users WHERE id=?", (uid,)).fetchone()
+        return {"id": uid, "email": WEB_DEV_USER_EMAIL, "tier": trow[0] if trow else "free"}
+    return None
+
+
+def _web_user_tier(user) -> str:
+    """Effective tier. Local `tier` column for now; once the payment app exposes
+    a subscription check (repo 2) this consults it as the source of truth."""
+    tier = (user or {}).get("tier", "free")
+    return tier if tier in WEB_TIER_LIMITS else "free"
+
+
+def _usage_today(user_id: int) -> int:
+    day = datetime.utcnow().strftime("%Y-%m-%d")
+    with _users_lock, _users_conn() as conn:
+        row = conn.execute("SELECT count FROM usage WHERE user_id=? AND day=?", (user_id, day)).fetchone()
+    return row[0] if row else 0
+
+
+def _bump_usage(user_id: int):
+    day = datetime.utcnow().strftime("%Y-%m-%d")
+    with _users_lock, _users_conn() as conn:
+        conn.execute(
+            "INSERT INTO usage (user_id, day, count) VALUES (?,?,1) "
+            "ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1",
+            (user_id, day),
+        )
+
+
+def _set_web_cookie(resp, token: str):
+    resp.set_cookie(
+        WEB_SESSION_COOKIE, token, max_age=WEB_SESSION_TTL_DAYS * 86400,
+        httponly=True, samesite="Lax", secure=request.is_secure, path="/",
+    )
+    return resp
+
+
+def _create_magic_link(email: str):
+    """Returns (token, error). Token is single-use and expires in WEB_MAGIC_TTL_MIN."""
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return None, "Enter a valid email address."
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    with _users_lock, _users_conn() as conn:
+        conn.execute(
+            "INSERT INTO magic_links (token_hash, email, created_at, expires_at, used) "
+            "VALUES (?,?,?,?,0)",
+            (_hash_token(token), email, now, now + WEB_MAGIC_TTL_MIN * 60),
+        )
+    return token, None
+
+
+def _consume_magic_link(token: str):
+    """Validate + burn a magic-link token. Returns the email or None."""
+    if not token:
+        return None
+    thash = _hash_token(token)
+    now = int(time.time())
+    with _users_lock, _users_conn() as conn:
+        row = conn.execute(
+            "SELECT email, expires_at, used FROM magic_links WHERE token_hash=?", (thash,)
+        ).fetchone()
+        if not row or row[2] or row[1] < now:
+            return None
+        conn.execute("UPDATE magic_links SET used=1 WHERE token_hash=?", (thash,))
+        return row[0]
+
+
+def _find_or_create_user_by_email(email: str) -> int:
+    """For passwordless sign-in: return the user id, creating a free account with
+    an unusable random password if the email is new."""
+    email = (email or "").strip().lower()
+    now = int(time.time())
+    with _users_lock, _users_conn() as conn:
+        row = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            return row[0]
+        pw_hash = generate_password_hash(secrets.token_urlsafe(24), method="pbkdf2:sha256")
+        cur = conn.execute(
+            "INSERT INTO users (email, pw_hash, tier, created_at) VALUES (?,?,?,?)",
+            (email, pw_hash, "free", now),
+        )
+        return cur.lastrowid
+
+
+def _send_login_email(email: str, link: str) -> bool:
+    """Best-effort delivery of the sign-in link. Uses Resend over HTTPS when
+    configured (SMTP is blocked on the droplet); otherwise logs it and returns
+    False so the caller can fall back to the dev echo."""
+    if not RESEND_API_KEY:
+        try:
+            with (_data_dir / "magic-links.log").open("a", encoding="utf-8") as f:
+                f.write("%d\t%s\t%s\n" % (int(time.time()), email, link))
+        except Exception:
+            pass
+        return False
+    try:
+        body = json.dumps({
+            "from": WEB_MAIL_FROM,
+            "to": [email],
+            "subject": "Your +downloads sign-in link",
+            "html": (
+                "<p>Tap to sign in to +downloads:</p>"
+                "<p><a href=\"%s\">Sign in</a></p>"
+                "<p>This link expires in %d minutes. If you didn't request it, ignore this email.</p>"
+                % (link, WEB_MAGIC_TTL_MIN)
+            ),
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.resend.com/emails", data=body,
+            headers={"Authorization": "Bearer " + RESEND_API_KEY, "Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=8).read()
+        return True
+    except Exception:
+        return False
 
 
 _COOKIE_ERROR_PATTERNS = [
@@ -4608,6 +4914,9 @@ def run_job(job_id: str):
         spotify_info = job.get("spotify_info") or {}
         apple_music_info = job.get("apple_music_info") or {}
         client_ip_val = job.get("client_ip")
+        # /web jobs carry per-tier caps; legacy online-tool jobs leave these None.
+        max_filesize_val = job.get("max_filesize")
+        max_duration_val = job.get("max_duration")
         save_jobs()
     if not url:
         with jobs_lock:
@@ -4681,7 +4990,14 @@ def run_job(job_id: str):
     output_path = None  # backward-compat: last detected path
     last_file = None
     log_file = None
-    cmd = cmd[:1] + cookies_args + proxy_args + cmd[1:]
+    # Per-tier caps (only set on /web jobs): reject over-size downloads and skip
+    # over-length media. `<=?` lets items pass when duration is unknown.
+    cap_args = []
+    if max_filesize_val and str(max_filesize_val) not in ("0", "0M", ""):
+        cap_args += ["--max-filesize", str(max_filesize_val)]
+    if max_duration_val and int(max_duration_val) > 0:
+        cap_args += ["--match-filter", "duration <=? %d" % int(max_duration_val)]
+    cmd = cmd[:1] + cookies_args + proxy_args + cap_args + cmd[1:]
 
     try:
         log_file = job_log_path(job_id).open("a", encoding="utf-8")
@@ -5697,6 +6013,14 @@ def download(job_id):
     if not job:
         abort(404)
 
+    # /web jobs are owned by an account; only that user may fetch the file.
+    # Legacy online-tool jobs have no user_id and stay publicly fetchable by id.
+    owner_id = job.get("user_id")
+    if owner_id is not None:
+        _u = _current_web_user(request)
+        if not _u or _u["id"] != owner_id:
+            abort(403)
+
     output_paths = job.get("output_paths") or []
     existing = [p for p in output_paths if p and os.path.exists(p) and _is_safe_path(p)]
 
@@ -6104,6 +6428,923 @@ def admin_review_action(review_id, action):
     return jsonify({"ok": True, "status": status})
 
 
+WEB_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>+downloads &bull; web</title>
+<meta name="description" content="Download music and video to your device and build a library that follows you everywhere.">
+<link rel="icon" href="/static/favicon.svg">
+<style>
+  :root{ --bg:#1a1818; --card:#242222; --bd:#2e2c2c; --tx:#f0eef0; --pink:#db52a6; --pink2:#c9479a; --mut:#a49ea2; --ok:#48c78e; --err:#ff6b6b; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--tx); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .wrap{ max-width:680px; margin:0 auto; padding:20px 16px 64px; }
+  header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:22px; }
+  .logo{ font-weight:800; font-size:20px; text-decoration:none; color:var(--pink); letter-spacing:-.2px; }
+  .lo-prefix{ color:var(--tx); }
+  .muted{ color:var(--mut); }
+  .card{ background:var(--card); border:1px solid var(--bd); border-radius:14px; padding:18px; margin-bottom:16px; }
+  h1{ font-size:22px; margin:0 0 4px; }
+  h2{ font-size:15px; text-transform:uppercase; letter-spacing:.08em; color:var(--mut); margin:0 0 12px; }
+  label{ display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input,select{ width:100%; background:#1c1a1a; border:1px solid var(--bd); border-radius:10px; color:var(--tx); padding:12px 14px; font-size:16px; }
+  input:focus,select:focus{ outline:none; border-color:var(--pink); }
+  button{ width:100%; background:var(--pink); color:#fff; border:0; border-radius:10px; padding:13px 16px; font-size:16px; font-weight:700; cursor:pointer; margin-top:14px; }
+  button:hover{ background:var(--pink2); }
+  button.ghost{ background:transparent; border:1px solid var(--bd); color:var(--tx); font-weight:600; }
+  button:disabled{ opacity:.5; cursor:default; }
+  .row{ display:flex; gap:10px; }
+  .row>*{ flex:1; }
+  .link{ color:var(--pink); cursor:pointer; text-decoration:underline; background:none; border:0; width:auto; padding:0; margin:0; font-size:14px; }
+  .msg{ font-size:14px; margin-top:10px; min-height:1.2em; }
+  .msg.err{ color:var(--err); }
+  .msg.ok{ color:var(--ok); }
+  .pill{ font-size:12px; padding:3px 9px; border-radius:999px; background:#332630; color:var(--pink); font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+  .status{ font-size:14px; color:var(--mut); margin-top:12px; white-space:pre-wrap; word-break:break-word; }
+  .bar{ height:6px; background:#1c1a1a; border-radius:6px; overflow:hidden; margin-top:8px; }
+  .bar>i{ display:block; height:100%; width:0; background:var(--pink); transition:width .3s; }
+  .lib{ display:grid; grid-template-columns:1fr; gap:8px; }
+  .item{ display:flex; gap:12px; align-items:center; background:#1f1d1d; border:1px solid var(--bd); border-radius:10px; padding:10px 12px; }
+  .item .cov{ width:46px; height:46px; border-radius:8px; object-fit:cover; background:#2a2727; flex:0 0 auto; }
+  .item .meta{ min-width:0; flex:1; }
+  .item .t{ font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .item .a{ font-size:13px; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .item .del{ background:none; border:0; color:var(--mut); width:auto; margin:0; padding:6px; font-size:18px; cursor:pointer; }
+  .ios{ background:linear-gradient(135deg,#332630,#241f28); border:1px solid #4a3346; border-radius:12px; padding:14px; margin-bottom:16px; font-size:14px; }
+  .ios a{ color:var(--pink); font-weight:700; }
+  .tour{ margin-bottom:16px; }
+  .tour-h{ font-size:24px; line-height:1.2; margin:2px 0 6px; }
+  .tour-sub{ color:var(--mut); margin:0 0 16px; font-size:15px; }
+  .feat{ display:grid; gap:10px; margin-bottom:14px; }
+  .fcard{ display:flex; gap:12px; align-items:flex-start; background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:12px 14px; }
+  .fi{ font-size:22px; line-height:1; }
+  .fcard b{ display:block; font-size:15px; margin-bottom:1px; }
+  .fcard span{ color:var(--mut); font-size:13px; }
+  .peek{ background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:12px 14px; margin-bottom:18px; }
+  .peek-label{ font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:var(--mut); margin-bottom:6px; }
+  .peek-item{ display:flex; gap:12px; align-items:center; margin:9px 0; }
+  .peek-cov{ width:42px; height:42px; border-radius:8px; flex:0 0 auto; }
+  .peek-item b{ display:block; font-size:14px; }
+  .peek-item span{ color:var(--mut); font-size:12px; }
+  .tour-cta{ text-align:center; color:var(--mut); font-size:13px; margin:0 0 6px; }
+  .hide{ display:none; }
+  .top{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .top .em{ font-size:13px; color:var(--mut); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  footer{ text-align:center; color:var(--mut); font-size:12px; margin-top:24px; }
+  footer a{ color:var(--mut); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
+    <span class="muted" style="font-size:13px;">web</span>
+  </header>
+
+  <!-- Signed out -->
+  <section id="auth" class="hide">
+    <div class="tour">
+      <h1 class="tour-h">Your music. On every device.</h1>
+      <p class="tour-sub">Paste a link, download straight to your device, and build a library that follows you everywhere. Free &mdash; 10 downloads a day.</p>
+      <div class="feat">
+        <div class="fcard"><div class="fi">&#11015;&#65039;</div><div><b>Download anything</b><span>YouTube, SoundCloud, Spotify, Apple Music &mdash; audio or video.</span></div></div>
+        <div class="fcard"><div class="fi">&#128218;</div><div><b>A library that follows you</b><span>Covers, artists and playlists, synced across your devices.</span></div></div>
+        <div class="fcard"><div class="fi">&#128241;</div><div><b>Plays offline in +media</b><span>Files land on your phone and play without a connection.</span></div></div>
+      </div>
+      <div class="peek">
+        <div class="peek-label">a peek inside your library</div>
+        <div class="peek-item"><div class="peek-cov" style="background:linear-gradient(135deg,#db52a6,#9b3adb);"></div><div><b>Blinding Lights</b><span>The Weeknd</span></div></div>
+        <div class="peek-item"><div class="peek-cov" style="background:linear-gradient(135deg,#bf9b3a,#db52a6);"></div><div><b>Levitating</b><span>Dua Lipa</span></div></div>
+        <div class="peek-item"><div class="peek-cov" style="background:linear-gradient(135deg,#48c78e,#9b3adb);"></div><div><b>As It Was</b><span>Harry Styles</span></div></div>
+      </div>
+      <p class="tour-cta">Create a free account to start &mdash; it takes seconds.</p>
+    </div>
+    <div class="card">
+      <h1 id="authTitle">Sign in</h1>
+      <p class="muted" id="authSub">Your library follows you across every device.</p>
+      <label>Email</label>
+      <input id="email" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com">
+      <label>Password</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="8+ characters">
+      <button id="authBtn">Sign in</button>
+      <div class="msg" id="authMsg"></div>
+      <p style="margin:14px 0 0;"><button class="link" id="authToggle">New here? Create an account</button></p>
+      <div style="border-top:1px solid var(--bd); margin:16px 0 0; padding-top:14px;">
+        <button class="ghost" id="magicBtn">Email me a sign-in link</button>
+        <div class="msg" id="magicMsg"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Signed in -->
+  <section id="app" class="hide">
+    <div class="card">
+      <div class="top">
+        <div>
+          <span class="pill" id="tierPill">free</span>
+          <span class="em" id="userEmail"></span>
+        </div>
+        <button class="link" id="logoutBtn">Log out</button>
+      </div>
+      <p class="muted" id="quota" style="margin:10px 0 0; font-size:13px;"></p>
+    </div>
+
+    <div class="ios hide" id="iosBanner">
+      Saving on iPhone or iPad? Get <a href="__IOS_URL__">+media</a> — downloads drop straight into your library app and play offline. You can still save files here to the Files app.
+    </div>
+
+    <div class="card">
+      <h2>Download</h2>
+      <label>Paste a link</label>
+      <input id="url" type="url" inputmode="url" autocapitalize="off" placeholder="YouTube, SoundCloud, Spotify, Apple Music…">
+      <label>Format</label>
+      <select id="type">
+        <option value="audio">Audio (MP3)</option>
+        <option value="video">Video (MP4)</option>
+      </select>
+      <button id="dlBtn">Download</button>
+      <div class="status hide" id="status"></div>
+      <div class="bar hide" id="barWrap"><i id="bar"></i></div>
+      <div class="msg" id="dlMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Your library</h2>
+      <div class="lib" id="lib"></div>
+      <p class="muted hide" id="libEmpty" style="font-size:14px;">Nothing saved yet. Your downloads show up here.</p>
+    </div>
+  </section>
+
+  <footer>
+    <a href="/privacy">Privacy</a> &bull; <a href="/terms">Terms</a>
+  </footer>
+</div>
+
+<script>
+var isSignup = false;
+var poll = null;
+var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+var IOS_APP_STORE_URL = "__IOS_URL__";
+
+function $(id){ return document.getElementById(id); }
+function show(el){ el.classList.remove('hide'); }
+function hide(el){ el.classList.add('hide'); }
+
+async function api(path, method, body){
+  var opt = { method: method || 'GET', credentials: 'same-origin', headers: {} };
+  if (body){ opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  var r = await fetch(path, opt);
+  var j = {};
+  try { j = await r.json(); } catch(e){}
+  return { ok: r.ok, status: r.status, data: j };
+}
+
+function setMsg(el, text, kind){ el.textContent = text || ''; el.className = 'msg' + (kind ? ' ' + kind : ''); }
+
+async function checkMe(){
+  var r = await api('/web/me');
+  if (r.ok){ renderUser(r.data); show($('app')); hide($('auth')); loadLibrary(); }
+  else { show($('auth')); hide($('app')); }
+}
+
+function renderUser(u){
+  $('userEmail').textContent = u.email;
+  $('tierPill').textContent = u.tier;
+  var left = Math.max(0, u.daily_limit - u.used_today);
+  $('quota').textContent = u.tier === 'pro'
+    ? 'Priority downloads • ' + u.used_today + ' today'
+    : left + ' of ' + u.daily_limit + ' downloads left today';
+  if (typeof u.allow_video !== 'undefined'){
+    var vopt = document.querySelector('#type option[value="video"]');
+    if (vopt){
+      vopt.disabled = !u.allow_video;
+      vopt.textContent = u.allow_video ? 'Video (MP4)' : 'Video (MP4) — Pro';
+      if (!u.allow_video && $('type').value === 'video') $('type').value = 'audio';
+    }
+  }
+  if (isIOS) show($('iosBanner'));
+}
+
+$('authToggle').onclick = function(){
+  isSignup = !isSignup;
+  $('authTitle').textContent = isSignup ? 'Create account' : 'Sign in';
+  $('authBtn').textContent = isSignup ? 'Create account' : 'Sign in';
+  $('authToggle').textContent = isSignup ? 'Have an account? Sign in' : 'New here? Create an account';
+  $('password').autocomplete = isSignup ? 'new-password' : 'current-password';
+  setMsg($('authMsg'), '');
+};
+
+$('authBtn').onclick = async function(){
+  var email = $('email').value.trim(), password = $('password').value;
+  if (!email || !password){ setMsg($('authMsg'), 'Enter your email and password.', 'err'); return; }
+  $('authBtn').disabled = true;
+  var r = await api(isSignup ? '/web/signup' : '/web/login', 'POST', { email: email, password: password });
+  $('authBtn').disabled = false;
+  if (r.ok){ $('password').value=''; checkMe(); }
+  else { setMsg($('authMsg'), r.data.error || 'Something went wrong.', 'err'); }
+};
+
+$('magicBtn').onclick = async function(){
+  var email = $('email').value.trim();
+  if (!email){ setMsg($('magicMsg'), 'Enter your email above first.', 'err'); return; }
+  $('magicBtn').disabled = true;
+  var r = await api('/web/magic/request', 'POST', { email: email });
+  $('magicBtn').disabled = false;
+  if (!r.ok){ setMsg($('magicMsg'), r.data.error || 'Could not send the link.', 'err'); return; }
+  if (r.data.dev_link){
+    $('magicMsg').innerHTML = 'Dev link ready: <a class="link" href="' + esc(r.data.dev_link) + '">tap to sign in</a>';
+    $('magicMsg').className = 'msg ok';
+  } else {
+    setMsg($('magicMsg'), 'Check your email for a sign-in link.', 'ok');
+  }
+};
+
+$('logoutBtn').onclick = async function(){
+  await api('/web/logout', 'POST');
+  location.reload();
+};
+
+$('dlBtn').onclick = function(){
+  var url = $('url').value.trim();
+  if (!url){ setMsg($('dlMsg'), 'Paste a link first.', 'err'); return; }
+  if (isIOS){ mobileHandoff(url, $('type').value); }
+  else { desktopDownload(url, $('type').value); }
+};
+
+// iPhone/iPad: resolve, then open the download in the +media app. If +media
+// isn't installed, fall back to the App Store.
+async function mobileHandoff(url, type){
+  setMsg($('dlMsg'), '');
+  $('dlBtn').disabled = true;
+  show($('status')); $('status').textContent = 'Preparing…';
+  var r = await api('/web/api/resolve', 'POST', { url: url, type: type });
+  $('dlBtn').disabled = false; hide($('status'));
+  if (!r.ok || !r.data.handoff_id){
+    setMsg($('dlMsg'), r.data.message || r.data.error || 'Could not prepare that link.', 'err');
+    return;
+  }
+  if (typeof r.data.used_today !== 'undefined' && r.data.daily_limit)
+    renderUser({ email: $('userEmail').textContent, tier: $('tierPill').textContent, used_today: r.data.used_today, daily_limit: r.data.daily_limit });
+  openInMedia(r.data.handoff_id);
+}
+
+function openInMedia(hid){
+  setMsg($('dlMsg'), 'Opening in +media…', 'ok');
+  var left = false;
+  function gone(){ left = true; }
+  document.addEventListener('visibilitychange', gone);
+  window.addEventListener('pagehide', gone);
+  window.addEventListener('blur', gone);
+  // If the app took over, the page backgrounds and `left` is true. Otherwise the
+  // app isn't installed — send them to the App Store to get +media.
+  setTimeout(function(){
+    document.removeEventListener('visibilitychange', gone);
+    window.removeEventListener('pagehide', gone);
+    window.removeEventListener('blur', gone);
+    if (!left && !document.hidden){
+      setMsg($('dlMsg'), 'Get the free +media app to save your downloads, then tap Download again.', 'err');
+      window.location.href = IOS_APP_STORE_URL;
+    }
+  }, 1600);
+  window.location.href = 'space-digitaldownloads://download?h=' + encodeURIComponent(hid);
+}
+
+// Desktop browser: server-side download (browsers can't fetch googlevideo directly).
+async function desktopDownload(url, type){
+  setMsg($('dlMsg'), '');
+  $('dlBtn').disabled = true;
+  show($('status')); $('status').textContent = 'Starting…';
+  var r = await api('/web/start', 'POST', { url: url, type: type });
+  if (!r.ok){
+    $('dlBtn').disabled = false; hide($('status'));
+    setMsg($('dlMsg'), r.data.message || r.data.error || 'Could not start.', 'err');
+    return;
+  }
+  if (typeof r.data.used_today !== 'undefined' && r.data.daily_limit)
+    renderUser({ email: $('userEmail').textContent, tier: $('tierPill').textContent, used_today: r.data.used_today, daily_limit: r.data.daily_limit });
+  watch(r.data.job_id, url);
+}
+
+function watch(jobId, sourceUrl){
+  show($('barWrap'));
+  if (poll) clearInterval(poll);
+  poll = setInterval(async function(){
+    var r = await api('/status/' + jobId);
+    var j = r.data || {};
+    $('status').textContent = (j.phase || j.status || '') + (j.log ? '' : '');
+    if (typeof j.progress_pct === 'number') $('bar').style.width = j.progress_pct + '%';
+    if (j.status === 'done'){
+      clearInterval(poll); poll = null;
+      $('bar').style.width = '100%';
+      finish(jobId, sourceUrl, j);
+    } else if (j.status === 'error'){
+      clearInterval(poll); poll = null;
+      $('dlBtn').disabled = false; hide($('barWrap')); hide($('status'));
+      setMsg($('dlMsg'), (j.log || 'Download failed.').split('\n').pop().slice(0, 200), 'err');
+    }
+  }, 1500);
+}
+
+function titleFrom(job, url){
+  var paths = job.output_paths || [];
+  if (paths.length){
+    var name = paths[0].split('/').pop();
+    return name.replace(/\.[a-z0-9]+$/i, '').replace(/\s*\[[^\]]+\]\s*$/, '').trim() || url;
+  }
+  return url;
+}
+
+async function finish(jobId, sourceUrl, job){
+  $('dlBtn').disabled = false;
+  hide($('barWrap')); hide($('status'));
+  setMsg($('dlMsg'), 'Saved. Check your downloads.', 'ok');
+  // Trigger the browser download (lands in Files on iOS, Downloads on desktop).
+  var a = document.createElement('a');
+  a.href = '/download/' + jobId; a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+  // Record the metadata-only library entry (no audio stored server-side).
+  await api('/web/api/library', 'POST', { source_url: sourceUrl, title: titleFrom(job, sourceUrl) });
+  $('url').value = '';
+  loadLibrary();
+}
+
+async function loadLibrary(){
+  var r = await api('/web/api/library');
+  var items = (r.data && r.data.items) || [];
+  var lib = $('lib'); lib.innerHTML = '';
+  if (!items.length){ show($('libEmpty')); return; }
+  hide($('libEmpty'));
+  items.forEach(function(it){
+    var row = document.createElement('div'); row.className = 'item';
+    var cov = it.cover_url ? '<img class="cov" src="' + esc(it.cover_url) + '" alt="">' : '<div class="cov"></div>';
+    row.innerHTML = cov +
+      '<div class="meta"><div class="t">' + esc(it.title || it.source_url) + '</div>' +
+      '<div class="a">' + esc(it.artist || '') + '</div></div>' +
+      '<button class="del" title="Remove" data-id="' + it.id + '">&times;</button>';
+    row.querySelector('.del').onclick = async function(){
+      await api('/web/api/library/' + this.getAttribute('data-id'), 'DELETE');
+      loadLibrary();
+    };
+    lib.appendChild(row);
+  });
+}
+
+function esc(s){ var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+checkMe();
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# /web — the mobile-first account edition. Real accounts + an audio-less library
+# index riding the same job engine that powers the online tool. The desktop
+# browser gets a plain download; on iPhone/iPad the +media app is the download
+# client and holds the files. See docs/web-route-plan.md.
+# ---------------------------------------------------------------------------
+
+def _web_user_public(user):
+    tier = _web_user_tier(user)
+    lim = WEB_TIER_LIMITS[tier]
+    return {
+        "email": user["email"],
+        "tier": tier,
+        "daily_limit": lim["daily"],
+        "used_today": _usage_today(user["id"]),
+        "priority": lim["priority"],
+        "allow_video": lim["allow_video"],
+    }
+
+
+@app.post("/web/signup")
+def web_signup():
+    data = request.get_json(silent=True) or {}
+    uid, err = _create_user(data.get("email", ""), data.get("password", ""))
+    if err:
+        return jsonify({"error": err}), 400
+    token = _create_session(uid)
+    return _set_web_cookie(make_response(jsonify({"ok": True, "token": token})), token)
+
+
+@app.post("/web/login")
+def web_login():
+    data = request.get_json(silent=True) or {}
+    uid = _verify_login(data.get("email", ""), data.get("password", ""))
+    if not uid:
+        return jsonify({"error": "Wrong email or password."}), 401
+    token = _create_session(uid)
+    return _set_web_cookie(make_response(jsonify({"ok": True, "token": token})), token)
+
+
+@app.post("/web/logout")
+def web_logout():
+    _destroy_session(_session_token_from_request(request))
+    resp = make_response(jsonify({"ok": True}))
+    resp.delete_cookie(WEB_SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.get("/web/me")
+def web_me():
+    user = _current_web_user(request)
+    if not user:
+        return jsonify({"error": "Not signed in."}), 401
+    return jsonify(_web_user_public(user))
+
+
+@app.post("/web/magic/request")
+def web_magic_request():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    token, err = _create_magic_link(email)
+    if err:
+        return jsonify({"error": err}), 400
+    link = request.host_url.rstrip("/") + "/web/magic/verify?token=" + token
+    sent = _send_login_email(email, link)
+    resp = {"ok": True, "sent": sent}
+    # Dev only: surface the link so it's usable without a mail provider. Never
+    # set unless WEB_MAGIC_LINK_ECHO=1 in the environment.
+    if WEB_MAGIC_ECHO:
+        resp["dev_link"] = link
+    return jsonify(resp)
+
+
+@app.get("/web/magic/verify")
+def web_magic_verify():
+    email = _consume_magic_link(request.args.get("token", ""))
+    if not email:
+        return Response(
+            "<h1 style='font-family:sans-serif'>Link expired</h1>"
+            "<p style='font-family:sans-serif'>That sign-in link is invalid or used. "
+            "<a href='/web'>Request a new one</a>.</p>",
+            mimetype="text/html", status=400,
+        )
+    uid = _find_or_create_user_by_email(email)
+    token = _create_session(uid)
+    return _set_web_cookie(make_response(redirect("/web")), token)
+
+
+@app.get("/web/api/library")
+def web_library_list():
+    user = _current_web_user(request)
+    if not user:
+        return jsonify({"error": "Not signed in."}), 401
+    with _users_lock, _users_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, source_url, title, artist, cover_url, tags, playlist, added_at "
+            "FROM library_items WHERE user_id=? ORDER BY added_at DESC",
+            (user["id"],),
+        ).fetchall()
+    items = [
+        {"id": r[0], "source_url": r[1], "title": r[2], "artist": r[3],
+         "cover_url": r[4], "tags": r[5], "playlist": r[6], "added_at": r[7]}
+        for r in rows
+    ]
+    return jsonify({"items": items})
+
+
+@app.post("/web/api/library")
+def web_library_add():
+    user = _current_web_user(request)
+    if not user:
+        return jsonify({"error": "Not signed in."}), 401
+    data = request.get_json(silent=True) or {}
+    source_url = (data.get("source_url") or "").strip()
+    if not source_url:
+        return jsonify({"error": "source_url is required."}), 400
+    now = int(time.time())
+    fields = (
+        (data.get("title") or "").strip()[:300] or None,
+        (data.get("artist") or "").strip()[:200] or None,
+        (data.get("cover_url") or "").strip()[:1000] or None,
+        (data.get("tags") or "").strip()[:500] or None,
+        (data.get("playlist") or "").strip()[:200] or None,
+    )
+    with _users_lock, _users_conn() as conn:
+        # One row per (user, source_url); re-adding refreshes the metadata.
+        existing = conn.execute(
+            "SELECT id FROM library_items WHERE user_id=? AND source_url=?",
+            (user["id"], source_url),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE library_items SET title=?, artist=?, cover_url=?, tags=?, playlist=? WHERE id=?",
+                fields + (existing[0],),
+            )
+            item_id = existing[0]
+        else:
+            cur = conn.execute(
+                "INSERT INTO library_items "
+                "(user_id, source_url, title, artist, cover_url, tags, playlist, added_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (user["id"], source_url) + fields + (now,),
+            )
+            item_id = cur.lastrowid
+    return jsonify({"ok": True, "id": item_id})
+
+
+@app.delete("/web/api/library/<int:item_id>")
+def web_library_delete(item_id):
+    user = _current_web_user(request)
+    if not user:
+        return jsonify({"error": "Not signed in."}), 401
+    with _users_lock, _users_conn() as conn:
+        conn.execute("DELETE FROM library_items WHERE id=? AND user_id=?", (item_id, user["id"]))
+    return jsonify({"ok": True})
+
+
+@app.post("/web/start")
+def web_start():
+    """Auth-gated enqueue for the /web app. Enforces the daily cap, stamps the
+    job with the user's tier caps + priority, and shares run_job()/dispatcher."""
+    user = _current_web_user(request)
+    if not user:
+        return jsonify({"error": "Please sign in to download."}), 401
+    if _load_hard_paused():
+        return jsonify({
+            "error": "paused", "paused": True,
+            "message": "Downloads are temporarily offline while we sort out an upstream issue.",
+        }), 503
+
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    job_type = (data.get("type") or "video").strip().lower()
+    if not is_valid_url(url):
+        return jsonify({"error": "Invalid URL"}), 400
+    _host = (urlparse(url).hostname or "").lower()
+    if any(d in _host for d in _WEB_BLOCKED_DOMAINS):
+        return jsonify({"error": "Adult content is not supported."}), 400
+    if detect_soundcloud(url) and job_type in {"", "auto", "video", "audio"}:
+        job_type = "soundcloud"
+    if detect_spotify(url):
+        job_type = "spotify"
+    if detect_apple_music(url):
+        job_type = "apple_music"
+    if job_type not in {"video", "audio", "soundcloud", "spotify", "apple_music"}:
+        return jsonify({"error": "Invalid type."}), 400
+
+    tier = _web_user_tier(user)
+    lim = WEB_TIER_LIMITS[tier]
+    # Video is ~16x the bandwidth of audio, so it's a Pro-only feature.
+    if job_type == "video" and not lim.get("allow_video", False):
+        return jsonify({
+            "error": "upgrade_required",
+            "message": "Video downloads are a Pro feature. Upgrade to download video, or switch to Audio (MP3).",
+        }), 402
+    if _usage_today(user["id"]) >= lim["daily"]:
+        return jsonify({
+            "error": "daily_limit",
+            "message": "You've hit today's limit of %d downloads. Upgrade for more, or come back tomorrow." % lim["daily"],
+        }), 429
+
+    spotify_info = None
+    apple_music_info = None
+    if job_type == "spotify":
+        try:
+            spotify_info = _spotify_fetch_metadata(url)
+        except Exception as e:
+            return jsonify({"error": f"Spotify API error: {e}"}), 400
+        if not spotify_info.get("tracks"):
+            return jsonify({"error": "No tracks found in Spotify URL."}), 400
+    if job_type == "apple_music":
+        try:
+            apple_music_info = _apple_music_fetch_metadata(url)
+        except Exception as e:
+            return jsonify({"error": f"Apple Music error: {e}"}), 400
+        if not apple_music_info.get("tracks"):
+            return jsonify({"error": "No tracks found in Apple Music URL."}), 400
+    track_count = len((spotify_info or apple_music_info or {}).get("tracks", []))
+    if track_count > MAX_PLAYLIST_TRACKS:
+        return jsonify({"error": f"Playlist too large ({track_count} tracks). Limit is {MAX_PLAYLIST_TRACKS}."}), 400
+
+    if DISK_CAP_GB > 0:
+        try:
+            if _disk_usage_gb(DOWNLOAD_DIR) >= DISK_CAP_GB:
+                return jsonify({"error": "Server storage is full. Try again in a bit."}), 503
+        except Exception:
+            pass
+
+    sc_quality = (data.get("sc_quality") or "m4a").strip().lower()
+    if sc_quality not in {"m4a", "mp3"}:
+        sc_quality = "m4a"
+    sc_playlist = bool(data.get("sc_playlist", True))
+
+    ip = _client_ip()
+    err, code = _check_ip_limits(ip)
+    if err:
+        return jsonify({"error": err}), code
+
+    prune_jobs()
+    job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "queued", "log": "Queued…", "created_at": datetime.utcnow(),
+            "file": None, "finished_at": None, "opened_folder": False,
+            "type": job_type, "url": url, "sc_quality": sc_quality, "sc_playlist": sc_playlist,
+            "output_paths": [], "spotify_info": spotify_info, "apple_music_info": apple_music_info,
+            "current_index": 0, "total_items": track_count, "progress_pct": 0, "failures": [],
+            "client_ip": ip,
+            # /web-specific fields consumed by run_job() and /download:
+            "user_id": user["id"], "priority": bool(lim["priority"]),
+            "max_duration": lim["max_duration"], "max_filesize": lim["max_filesize"],
+        }
+        save_jobs()
+    with queue_cv:
+        if len(job_queue) >= MAX_QUEUE_DEPTH:
+            with jobs_lock:
+                jobs.pop(job_id, None)
+            _release_ip(ip)
+            return jsonify({"error": "The queue is full right now. Try again in a moment."}), 429
+        # Priority (paid) jobs jump the standard lane by going to the front of the
+        # same deque — no second queue, so queue_position()/dispatcher() are
+        # unchanged. Within the priority group order is LIFO; fine at this scale.
+        if lim["priority"]:
+            job_queue.appendleft(job_id)
+        else:
+            job_queue.append(job_id)
+        queue_cv.notify()
+    _bump_usage(user["id"])
+    return jsonify({
+        "job_id": job_id, "status": "queued",
+        "used_today": _usage_today(user["id"]), "daily_limit": lim["daily"],
+    })
+
+
+@app.get("/web")
+def web_app():
+    return Response(WEB_HTML.replace("__IOS_URL__", IOS_APP_STORE_URL), mimetype="text/html")
+
+
+def _dev_resolve_gv(vid: str):
+    """DEV: resolve a YouTube id to a browser-PLAYABLE progressive URL (itag 18,
+    muxed mp4) so playback success in the tester reflects fetch success — a raw
+    DASH audio stream (itag 140) can't play in a plain media tag even when the
+    bytes fetch fine. Tries several clients. Returns a dict with url/ip/title."""
+    for client in ("web_safari", "mweb", "tv", "android_vr"):
+        cmd = [
+            YT_DLP_BIN, "--extractor-args", "youtube:player_client=" + client,
+            "--no-warnings", "-f", "18", "--print", "title", "--print", "urls",
+            "https://www.youtube.com/watch?v=" + vid,
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+            if len(lines) >= 2:
+                title, url = lines[0], lines[-1]
+                ip = parse_qs(urlparse(url).query).get("ip", ["?"])[0]
+                return {"vid": vid, "title": title, "url": url, "ip": ip, "client": client, "ok": True}
+        except Exception:
+            continue
+    return {"vid": vid, "ok": False, "err": "no playable progressive (itag 18) from any client"}
+
+
+def _resolve_direct(youtube_url: str, want_itag: str, clients, timeout: int = 60):
+    """Resolve a YouTube URL to a single directly-fetchable format URL + metadata,
+    for the client-direct model (server extracts, client fetches the bytes). Returns
+    {ok, media_url, title, artist, cover_url, duration, ext, mime, filesize, expires}.
+    Extraction goes through the proxy/cookies (small, ~KB) so it works from the
+    bot-walled droplet; the media_url itself is fetched by the client, not us."""
+    for client in clients:
+        cmd = [YT_DLP_BIN, "--extractor-args", "youtube:player_client=" + client, "--no-warnings"]
+        if COOKIES_PATH and os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 10:
+            cmd += ["--cookies", COOKIES_PATH]
+        if PROXY_URL:
+            cmd += ["--proxy", PROXY_URL]
+        cmd += ["-J", youtube_url]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if not (r.stdout or "").strip():
+                continue
+            info = json.loads(r.stdout)
+        except Exception:
+            continue
+        fmt = next((f for f in (info.get("formats") or [])
+                    if str(f.get("format_id")) == want_itag and f.get("url")), None)
+        if not fmt:
+            continue
+        q = parse_qs(urlparse(fmt["url"]).query)
+        return {
+            "ok": True,
+            "media_url": fmt["url"],
+            "title": info.get("title"),
+            "artist": info.get("artist") or info.get("uploader") or info.get("channel"),
+            "cover_url": info.get("thumbnail"),
+            "duration": info.get("duration"),
+            "ext": fmt.get("ext"),
+            "mime": (q.get("mime") or [None])[0],
+            "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+            "expires": int(q["expire"][0]) if q.get("expire") else None,
+            "client": client,
+        }
+    return {"ok": False}
+
+
+# Short-lived, single-use handoff records. The mobile web resolves a link, stashes
+# the result here, and hands +media a tiny id via space-digitaldownloads://download?h=<id>.
+# +media fetches it once to get the direct media URL. In-memory is fine — prod is a
+# single gunicorn worker — and records expire fast.
+_web_handoffs = {}
+_web_handoffs_lock = threading.Lock()
+WEB_HANDOFF_TTL = 900  # 15 min
+
+
+def _create_handoff(payload: dict) -> str:
+    hid = secrets.token_urlsafe(16)
+    now = time.time()
+    with _web_handoffs_lock:
+        _web_handoffs[hid] = (now + WEB_HANDOFF_TTL, payload)
+        for k in [k for k, (exp, _) in _web_handoffs.items() if exp < now]:
+            _web_handoffs.pop(k, None)
+    return hid
+
+
+@app.get("/web/api/handoff/<hid>")
+def web_handoff_get(hid):
+    """+media fetches this once to get the direct media URL for a web download.
+    Public (the id is an unguessable capability), single-use, short-lived."""
+    now = time.time()
+    with _web_handoffs_lock:
+        rec = _web_handoffs.pop(hid, None)
+    if not rec or rec[0] < now:
+        return jsonify({"error": "expired"}), 404
+    return jsonify(rec[1])
+
+
+@app.post("/web/api/resolve")
+def web_resolve():
+    """Client-direct download: return a direct googlevideo URL + metadata that the
+    client (+media / browser) fetches itself, so the media bytes never touch our
+    proxy. Audio -> itag 140 (m4a, native playback); video (Pro) -> itag 18. Same
+    auth/tier/cap rules as /web/start; falls back to /web/start for non-YouTube."""
+    user = _current_web_user(request)
+    if not user:
+        return jsonify({"error": "Please sign in to download."}), 401
+    if _load_hard_paused():
+        return jsonify({"error": "paused", "paused": True,
+                        "message": "Downloads are temporarily offline."}), 503
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    job_type = (data.get("type") or "audio").strip().lower()
+    if not is_valid_url(url):
+        return jsonify({"error": "Invalid URL"}), 400
+    host = (urlparse(url).hostname or "").lower()
+    if any(d in host for d in _WEB_BLOCKED_DOMAINS):
+        return jsonify({"error": "Adult content is not supported."}), 400
+    if not ("youtube.com" in host or "youtu.be" in host):
+        return jsonify({"error": "direct_unsupported",
+                        "message": "Direct fetch currently supports YouTube links. Other sources use the standard download."}), 415
+
+    want_video = job_type == "video"
+    tier = _web_user_tier(user)
+    lim = WEB_TIER_LIMITS[tier]
+    if want_video and not lim.get("allow_video", False):
+        return jsonify({"error": "upgrade_required",
+                        "message": "Video downloads are a Pro feature. Upgrade, or switch to Audio."}), 402
+    if _usage_today(user["id"]) >= lim["daily"]:
+        return jsonify({"error": "daily_limit",
+                        "message": "You've hit today's limit of %d downloads." % lim["daily"]}), 429
+
+    if want_video:
+        info = _resolve_direct(url, "18", ["web_safari", "mweb", "tv", "android_vr"])
+    else:
+        info = _resolve_direct(url, "140", ["android_vr", "tv", "mweb"])
+    if not info.get("ok"):
+        return jsonify({"error": "resolve_failed",
+                        "message": "Couldn't get a direct link — try again, or use the standard download."}), 502
+
+    maxd = lim.get("max_duration", 0)
+    if maxd and info.get("duration") and info["duration"] > maxd:
+        return jsonify({"error": "too_long",
+                        "message": "That's longer than the %d-minute limit on your plan." % (maxd // 60)}), 402
+
+    _bump_usage(user["id"])
+    # Stash a handoff so the mobile web can open the download in +media by id
+    # (space-digitaldownloads://download?h=<id>) without a long deep-link URL.
+    handoff_id = _create_handoff({
+        "media_url": info["media_url"],
+        "title": info.get("title"),
+        "artist": info.get("artist"),
+        "cover_url": info.get("cover_url"),
+        "ext": info.get("ext"),
+        "mime": info.get("mime"),
+        "filesize": info.get("filesize"),
+        "duration": info.get("duration"),
+        "video": want_video,
+    })
+    return jsonify({
+        "ok": True,
+        "handoff_id": handoff_id,
+        "source_url": url,
+        "media_url": info["media_url"],
+        "mime": info.get("mime"),
+        "ext": info.get("ext"),
+        "filesize": info.get("filesize"),
+        "duration": info.get("duration"),
+        "title": info.get("title"),
+        "artist": info.get("artist"),
+        "cover_url": info.get("cover_url"),
+        "expires": info.get("expires"),
+        "used_today": _usage_today(user["id"]),
+        "daily_limit": lim["daily"],
+        # The client fetches media_url with Range requests and follows redirects.
+        "fetch": {"range_required": True, "follow_redirects": True},
+    })
+
+
+@app.get("/web/dev/portability")
+def web_dev_portability():
+    """DEV: on-device test that a googlevideo URL minted by THIS server can be
+    fetched by another device/IP (the phone). Resolves server-side, plays client-
+    side. See docs — this settles whether 'server extracts, client fetches' works."""
+    if not WEB_DEV_TOOLS:
+        abort(404)
+    ids = [v for v, _ in DEV_TEST_VIDEOS]
+    titles = {v: t for v, t in DEV_TEST_VIDEOS}
+    custom = (request.args.get("v") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", custom):
+        ids = [custom] + [i for i in ids if i != custom]
+        titles.setdefault(custom, "custom: " + custom)
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(_dev_resolve_gv, ids))
+
+    blocks = []
+    for r in results:
+        title = html.escape(titles.get(r["vid"], r["vid"]))
+        if not r.get("ok"):
+            blocks.append(
+                f'<div class="v"><div class="vt">{title}</div>'
+                f'<div class="ipline"><span class="bad">server could not resolve</span> '
+                f'<small>{html.escape(r.get("err",""))}</small></div></div>'
+            )
+            continue
+        u = html.escape(r["url"])
+        vid = html.escape(r["vid"])
+        blocks.append(
+            f'<div class="v"><div class="vt">{title}</div>'
+            f'<div class="ipline">minted for IP <code>{html.escape(r["ip"])}</code> &middot; '
+            f'<span class="stat" id="s_{vid}">tap &#9654; to test</span></div>'
+            f'<video class="au" id="a_{vid}" data-id="{vid}" controls playsinline preload="none" src="{u}"></video></div>'
+        )
+    body = "\n".join(blocks)
+    page = r"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portability test</title>
+<style>
+  body{margin:0;background:#1a1818;color:#f0eef0;font:16px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;padding:18px;}
+  .wrap{max-width:640px;margin:0 auto;}
+  h1{font-size:20px;} code{background:#2a2727;padding:1px 6px;border-radius:5px;color:#db52a6;}
+  .how{background:#242222;border:1px solid #2e2c2c;border-radius:12px;padding:14px;font-size:14px;margin-bottom:16px;}
+  .how ol{margin:8px 0 0;padding-left:20px;} .how li{margin:4px 0;}
+  .me{background:#242222;border:1px solid #2e2c2c;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:14px;}
+  .v{background:#242222;border:1px solid #2e2c2c;border-radius:12px;padding:12px 14px;margin-bottom:10px;}
+  .vt{font-weight:700;margin-bottom:4px;} .ipline{font-size:13px;color:#a49ea2;margin-bottom:8px;}
+  .au{width:100%;max-height:200px;background:#000;border-radius:8px;}
+  .stat{font-weight:700;} .ok{color:#48c78e;} .bad{color:#ff6b6b;}
+  button{background:#db52a6;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:700;}
+</style></head><body><div class="wrap">
+<h1>googlevideo portability test</h1>
+<div class="how"><b>What this proves:</b> the server below resolved each item into a Google media link
+tied to the <i>server's</i> IP. If your <i>phone</i> can play them from a <b>different</b> IP, then
+&ldquo;server extracts &rarr; phone fetches direct&rdquo; works &mdash; and your proxy cost mostly disappears.
+<br><small>(These are short <b>video</b> clips on purpose &mdash; they play reliably in a browser, unlike a raw
+audio stream. The real app fetches audio the same way over a native connection.)</small>
+<ol>
+<li>Open this page on your phone (same network as the server).</li>
+<li><b>Turn off Wi-Fi</b> so the phone is on cellular &mdash; a different IP than the server.</li>
+<li>Tap <b>Check my IP</b> below and confirm it differs from the <code>minted for IP</code> shown per song.</li>
+<li>Tap &#9654; on each song. <span class="ok">Plays = portable &#10003;</span>. <span class="bad">Fails = blocked &#10007;</span>.</li>
+</ol></div>
+<div class="me">Your phone's current public IP: <code id="phoneip">checking&hellip;</code>
+&nbsp;<button onclick="getip()">Check my IP</button></div>
+__BODY__
+<p style="color:#a49ea2;font-size:13px;margin-top:16px;">Add <code>?v=VIDEOID</code> to test your own. Links expire in a few hours.</p>
+</div><script>
+function getip(){
+  document.getElementById('phoneip').textContent='checking…';
+  fetch('https://api.ipify.org?format=text',{cache:'no-store'})
+    .then(function(r){return r.text();})
+    .then(function(t){document.getElementById('phoneip').textContent=t;})
+    .catch(function(){document.getElementById('phoneip').textContent='(could not fetch)';});
+}
+getip();
+document.querySelectorAll('.au').forEach(function(a){
+  var s=document.getElementById('s_'+a.getAttribute('data-id'));
+  function ok(m){s.textContent=m;s.className='stat ok';}
+  function bad(m){s.textContent=m;s.className='stat bad';}
+  a.addEventListener('loadeddata',function(){ok('✓ fetched OK');});
+  a.addEventListener('playing',function(){ok('✓ playing');});
+  a.addEventListener('error',function(){bad('✗ blocked / failed');});
+});
+</script></body></html>"""
+    page = page.replace("__BODY__", body)
+    return Response(page, mimetype="text/html")
+
+
 @app.before_request
 def _global_rate_limit():
     if request.path.startswith(('/status/', '/health', '/static/')):
@@ -6135,11 +7376,28 @@ def add_security_headers(response):
                     _record_pageview("/?ref=" + ref)
     except Exception:
         pass
+    # DEV tools (/web/dev/*, off in prod) need to load audio from googlevideo and
+    # fetch the phone's IP — give them a permissive policy and return early.
+    if request.path.startswith("/web/dev"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self' 'unsafe-inline' https: data: blob:; "
+            "media-src 'self' https:; connect-src 'self' https:; img-src 'self' https: data:"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    # The /web library shows cover thumbnails hosted on external CDNs (ytimg,
+    # scdn, mzstatic…), so loosen img-src to any https there. Other pages keep
+    # the tight policy.
+    csp_img = "img-src 'self' data: https://pagead2.googlesyndication.com"
+    if request.path == "/web":
+        csp_img = "img-src 'self' data: https:"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "script-src 'self' 'unsafe-inline' https://pagead2.googlesyndication.com https://www.googletagservices.com; "
-        "img-src 'self' data: https://pagead2.googlesyndication.com; "
+        + csp_img + "; "
         "frame-src https://googleads.g.doubleclick.net https://tpc.googlesyndication.com; "
         "connect-src 'self' https://pagead2.googlesyndication.com"
     )
