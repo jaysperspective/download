@@ -7368,6 +7368,51 @@ def _resolve_direct(youtube_url: str, want_video: bool = False, timeout: int = 1
     }
 
 
+def _resolve_soundcloud(url: str, timeout: int = 60):
+    """Resolve a SoundCloud track to its progressive http MP3 — a single file the
+    client fetches directly. No residential proxy (SoundCloud doesn't bot-wall
+    datacenter IPs) and no YouTube match. `--no-playlist` so a set URL grabs one
+    track; HLS-only tracks (no progressive) fail gracefully."""
+    D = "|~|"
+    tmpl = D.join(["%(title)s", "%(uploader)s", "%(thumbnail)s", "%(duration)s",
+                   "%(ext)s", "%(filesize,filesize_approx)s", "%(url)s"])
+    cmd = [YT_DLP_BIN, "--no-warnings", "--no-playlist",
+           "-f", "bestaudio[protocol^=http]", "--print", tmpl, url]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return {"ok": False}
+    lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    if not lines:
+        return {"ok": False}
+    parts = lines[0].split(D)
+    if len(parts) < 7 or not parts[6].startswith("http"):
+        return {"ok": False}
+
+    def _clean(s):
+        s = (s or "").strip()
+        return s if s and s != "NA" else None
+
+    def _num(s):
+        try:
+            return int(float(s))
+        except Exception:
+            return None
+
+    return {
+        "ok": True,
+        "media_url": parts[6],
+        "title": _clean(parts[0]),
+        "artist": _clean(parts[1]),
+        "cover_url": parts[2].strip() if parts[2].strip().startswith("http") else None,
+        "duration": _num(parts[3]),
+        "ext": _clean(parts[4]) or "mp3",
+        "filesize": _num(parts[5]),
+        "mime": None,
+        "expires": None,
+    }
+
+
 # Short-lived, single-use handoff records. The mobile web resolves a link, stashes
 # the result here, and hands +media a tiny id via space-digitaldownloads://download?h=<id>.
 # +media fetches it once to get the direct media URL. In-memory is fine — prod is a
@@ -7420,9 +7465,11 @@ def web_resolve():
     host = (urlparse(url).hostname or "").lower()
     if any(d in host for d in _WEB_BLOCKED_DOMAINS):
         return jsonify({"error": "Adult content is not supported."}), 400
-    if not ("youtube.com" in host or "youtu.be" in host):
+    is_youtube = "youtube.com" in host or "youtu.be" in host
+    is_soundcloud = "soundcloud.com" in host or "snd.sc" in host
+    if not (is_youtube or is_soundcloud):
         return jsonify({"error": "direct_unsupported",
-                        "message": "Direct fetch currently supports YouTube links. Other sources use the standard download."}), 415
+                        "message": "The web app supports YouTube and SoundCloud right now. For Apple Music and Spotify, use the +downloads desktop app."}), 415
 
     want_video = job_type == "video"
     tier = _web_user_tier(user)
@@ -7435,7 +7482,7 @@ def web_resolve():
         return jsonify({"error": "daily_limit",
                         "message": "You've hit today's limit of %d downloads." % lim["daily"]}), 429
 
-    info = _resolve_direct(url, want_video=want_video)
+    info = _resolve_soundcloud(url) if is_soundcloud else _resolve_direct(url, want_video=want_video)
     if not info.get("ok"):
         _web_event("error", user_id=user["id"], platform=_web_platform(),
                    source=_web_source(url), detail="resolve_failed")
