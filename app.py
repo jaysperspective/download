@@ -6580,6 +6580,13 @@ WEB_HTML = r"""<!doctype html>
   .peek-item b{ display:block; font-size:14px; }
   .peek-item span{ color:var(--mut); font-size:12px; }
   .tour-cta{ text-align:center; color:var(--mut); font-size:13px; margin:0 0 6px; }
+  .bmodal{ position:fixed; inset:0; background:rgba(0,0,0,.62); display:none; align-items:center; justify-content:center; padding:22px; z-index:200; }
+  .bmodal.show{ display:flex; }
+  .bmodal .bx{ background:var(--card); border:1px solid var(--bd); border-radius:16px; padding:24px; max-width:340px; text-align:center; }
+  .bmodal .badge{ display:inline-block; background:var(--pink); color:#fff; font-size:11px; font-weight:800; letter-spacing:.12em; padding:4px 11px; border-radius:999px; margin-bottom:12px; }
+  .bmodal h3{ margin:0 0 8px; font-size:18px; }
+  .bmodal p{ color:var(--mut); font-size:14px; margin:0 0 16px; line-height:1.5; }
+  .bmodal .report{ display:inline-block; color:var(--pink); font-weight:700; text-decoration:none; margin-bottom:16px; font-size:14px; }
   .hide{ display:none; }
   .top{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
   .top .em{ font-size:13px; color:var(--mut); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -6591,7 +6598,7 @@ WEB_HTML = r"""<!doctype html>
 <div class="wrap">
   <header>
     <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
-    <span class="muted" style="font-size:13px;">web</span>
+    <span class="muted" style="font-size:13px;">web <b style="color:var(--pink)">beta</b></span>
   </header>
 
   <!-- Signed out -->
@@ -6669,8 +6676,18 @@ WEB_HTML = r"""<!doctype html>
     </div>
   </section>
 
+  <div class="bmodal" id="betaModal">
+    <div class="bx">
+      <div class="badge">BETA</div>
+      <h3>Heads up — this is brand new</h3>
+      <p>The web app is in beta, so downloads might not always work yet. If something breaks, please let me know — it really helps.</p>
+      <a class="report" href="mailto:digitalsov2026@gmail.com?subject=%2Bdownloads%20web%20beta%20bug">Report a bug</a>
+      <button id="betaOk">Got it</button>
+    </div>
+  </div>
+
   <footer>
-    <a href="/privacy">Privacy</a> &bull; <a href="/terms">Terms</a>
+    <a href="/privacy">Privacy</a> &bull; <a href="/terms">Terms</a> &bull; <a href="mailto:digitalsov2026@gmail.com?subject=%2Bdownloads%20web%20beta%20bug">Report a bug</a>
   </footer>
 </div>
 
@@ -6883,6 +6900,13 @@ async function loadLibrary(){
 }
 
 function esc(s){ var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+// Beta notice — shown once per device; has a report-a-bug link.
+if (!localStorage.getItem('web_beta_seen_v1')){
+  var _bm = $('betaModal'); if (_bm) _bm.classList.add('show');
+}
+var _bok = $('betaOk');
+if (_bok) _bok.onclick = function(){ localStorage.setItem('web_beta_seen_v1', '1'); $('betaModal').classList.remove('show'); };
 
 checkMe();
 </script>
