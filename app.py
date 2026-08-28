@@ -6870,8 +6870,11 @@ $('logoutBtn').onclick = async function(){
 $('dlBtn').onclick = function(){
   var url = $('url').value.trim();
   if (!url){ setMsg($('dlMsg'), 'Paste a link first.', 'err'); return; }
-  if (isIOS){ mobileHandoff(url, $('type').value); }
-  else { desktopDownload(url, $('type').value); }
+  var type = $('type').value;
+  // Audio on iPhone/iPad opens straight in +media (client-direct). Video has no
+  // progressive stream to hand off, so it takes the standard server-side download.
+  if (isIOS && type === 'audio'){ mobileHandoff(url, 'audio'); }
+  else { desktopDownload(url, type); }
 };
 
 // iPhone/iPad: resolve, then open the download in the +media app. If +media
