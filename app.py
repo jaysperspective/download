@@ -7308,47 +7308,58 @@ def _dev_resolve_gv(vid: str):
     return {"vid": vid, "ok": False, "err": "no playable progressive (itag 18) from any client"}
 
 
-def _resolve_direct(youtube_url: str, want_itag: str, clients, timeout: int = 60):
-    """Resolve a YouTube URL to a single directly-fetchable format URL + metadata,
-    for the client-direct model (server extracts, client fetches the bytes). Returns
-    {ok, media_url, title, artist, cover_url, duration, ext, mime, filesize, expires}.
-    Extraction goes through the proxy/cookies (small, ~KB) so it works from the
-    bot-walled droplet; the media_url itself is fetched by the client, not us."""
-    for client in clients:
-        cmd = [YT_DLP_BIN, "--extractor-args", "youtube:player_client=" + client, "--no-warnings"]
-        if COOKIES_PATH and os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 10:
-            cmd += ["--cookies", COOKIES_PATH]
-        if PROXY_URL:
-            cmd += ["--proxy", PROXY_URL]
-        cmd += ["-J", youtube_url]
+def _resolve_direct(youtube_url: str, want_video: bool = False, timeout: int = 120):
+    """Resolve a YouTube URL to one directly-fetchable format URL + metadata for the
+    client-direct model (server extracts through the proxy — small — the client
+    fetches the bytes). Mirrors the online tool's proven extraction: default client +
+    `--js-runtimes node` (po_token) + cookies + proxy, with format selection. Audio ->
+    itag 140 (m4a, iOS-native); video -> itag 18 (progressive mp4). Returns
+    {ok, media_url, title, artist, cover_url, duration, ext, mime, filesize, expires}."""
+    fmt_sel = "18/best[ext=mp4][acodec!=none]" if want_video else "140/bestaudio[ext=m4a]/bestaudio"
+    D = "|~|"
+    tmpl = D.join(["%(title)s", "%(uploader)s", "%(thumbnail)s", "%(duration)s",
+                   "%(ext)s", "%(filesize,filesize_approx)s", "%(url)s"])
+    cmd = [YT_DLP_BIN, "--no-warnings", "--js-runtimes", "node"]
+    if COOKIES_PATH and os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 10:
+        cmd += ["--cookies", COOKIES_PATH]
+    if PROXY_URL:
+        cmd += ["--proxy", PROXY_URL]
+    cmd += ["-f", fmt_sel, "--print", tmpl, youtube_url]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return {"ok": False}
+    lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    if not lines:
+        return {"ok": False}
+    parts = lines[0].split(D)
+    if len(parts) < 7 or not parts[6].startswith("http"):
+        return {"ok": False}
+    murl = parts[6]
+    q = parse_qs(urlparse(murl).query)
+
+    def _clean(s):
+        s = (s or "").strip()
+        return s if s and s != "NA" else None
+
+    def _num(s):
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            if not (r.stdout or "").strip():
-                continue
-            info = json.loads(r.stdout)
+            return int(float(s))
         except Exception:
-            continue
-        if not isinstance(info, dict):   # a client can return `null` — skip it
-            continue
-        fmt = next((f for f in (info.get("formats") or [])
-                    if str(f.get("format_id")) == want_itag and f.get("url")), None)
-        if not fmt:
-            continue
-        q = parse_qs(urlparse(fmt["url"]).query)
-        return {
-            "ok": True,
-            "media_url": fmt["url"],
-            "title": info.get("title"),
-            "artist": info.get("artist") or info.get("uploader") or info.get("channel"),
-            "cover_url": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "ext": fmt.get("ext"),
-            "mime": (q.get("mime") or [None])[0],
-            "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
-            "expires": int(q["expire"][0]) if q.get("expire") else None,
-            "client": client,
-        }
-    return {"ok": False}
+            return None
+
+    return {
+        "ok": True,
+        "media_url": murl,
+        "title": _clean(parts[0]),
+        "artist": _clean(parts[1]),
+        "cover_url": parts[2].strip() if parts[2].strip().startswith("http") else None,
+        "duration": _num(parts[3]),
+        "ext": _clean(parts[4]) or ("mp4" if want_video else "m4a"),
+        "filesize": _num(parts[5]),
+        "mime": (q.get("mime") or [None])[0],
+        "expires": int(q["expire"][0]) if q.get("expire") else None,
+    }
 
 
 # Short-lived, single-use handoff records. The mobile web resolves a link, stashes
@@ -7418,10 +7429,7 @@ def web_resolve():
         return jsonify({"error": "daily_limit",
                         "message": "You've hit today's limit of %d downloads." % lim["daily"]}), 429
 
-    if want_video:
-        info = _resolve_direct(url, "18", ["web_safari", "mweb", "tv", "android_vr"])
-    else:
-        info = _resolve_direct(url, "140", ["android_vr", "tv", "mweb"])
+    info = _resolve_direct(url, want_video=want_video)
     if not info.get("ok"):
         _web_event("error", user_id=user["id"], platform=_web_platform(),
                    source=_web_source(url), detail="resolve_failed")
