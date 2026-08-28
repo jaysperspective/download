@@ -7413,6 +7413,37 @@ def _resolve_soundcloud(url: str, timeout: int = 60):
     }
 
 
+def _resolve_apple_spotify(url: str, is_apple: bool):
+    """Single Apple Music / Spotify TRACK links only: read the title+artist (no
+    proxy), match it on YouTube (ytsearch1) and resolve the itag-140 URL the client
+    fetches directly. Albums/playlists return reason='album' — they need a
+    multi-track handoff the current +media build doesn't have yet."""
+    q = parse_qs(urlparse(url).query)
+    low = url.lower()
+    single = (("i" in q) or "/song/" in low) if is_apple else ("/track/" in low)
+    if not single:
+        return {"ok": False, "reason": "album"}
+    try:
+        meta = _apple_music_fetch_metadata(url) if is_apple else _spotify_fetch_metadata(url)
+    except Exception as e:
+        return {"ok": False, "reason": "meta", "detail": str(e)[:200]}
+    tracks = (meta or {}).get("tracks", [])
+    if (meta or {}).get("kind") != "track" or len(tracks) != 1:
+        return {"ok": False, "reason": "album"}
+    title = (tracks[0].get("title") or "").strip()
+    artist = (tracks[0].get("artist") or "").strip()
+    if not title:
+        return {"ok": False, "reason": "meta", "detail": "Couldn't read the track name."}
+    info = _resolve_direct(("ytsearch1:%s %s" % (artist, title)).strip())
+    if not info.get("ok"):
+        return {"ok": False, "reason": "match"}
+    # Prefer the Apple/Spotify title+artist over the matched YouTube video's.
+    info["title"] = title
+    if artist:
+        info["artist"] = artist
+    return info
+
+
 # Short-lived, single-use handoff records. The mobile web resolves a link, stashes
 # the result here, and hands +media a tiny id via space-digitaldownloads://download?h=<id>.
 # +media fetches it once to get the direct media URL. In-memory is fine — prod is a
@@ -7467,9 +7498,11 @@ def web_resolve():
         return jsonify({"error": "Adult content is not supported."}), 400
     is_youtube = "youtube.com" in host or "youtu.be" in host
     is_soundcloud = "soundcloud.com" in host or "snd.sc" in host
-    if not (is_youtube or is_soundcloud):
+    is_spotify = detect_spotify(url)
+    is_apple = detect_apple_music(url)
+    if not (is_youtube or is_soundcloud or is_spotify or is_apple):
         return jsonify({"error": "direct_unsupported",
-                        "message": "The web app supports YouTube and SoundCloud right now. For Apple Music and Spotify, use the +downloads desktop app."}), 415
+                        "message": "Paste a YouTube, SoundCloud, Spotify, or Apple Music link — or use the +downloads desktop app."}), 415
 
     want_video = job_type == "video"
     tier = _web_user_tier(user)
@@ -7482,12 +7515,24 @@ def web_resolve():
         return jsonify({"error": "daily_limit",
                         "message": "You've hit today's limit of %d downloads." % lim["daily"]}), 429
 
-    info = _resolve_soundcloud(url) if is_soundcloud else _resolve_direct(url, want_video=want_video)
+    if is_soundcloud:
+        info = _resolve_soundcloud(url)
+    elif is_spotify or is_apple:
+        info = _resolve_apple_spotify(url, is_apple)
+    else:
+        info = _resolve_direct(url, want_video=want_video)
     if not info.get("ok"):
+        reason = info.get("reason") or "resolve_failed"
         _web_event("error", user_id=user["id"], platform=_web_platform(),
-                   source=_web_source(url), detail="resolve_failed")
+                   source=_web_source(url), detail=reason)
+        if reason == "album":
+            return jsonify({"error": "album_unsupported",
+                            "message": "Whole albums and playlists can't be downloaded on the web yet — paste a single-song link, or get the full album in the +downloads desktop app."}), 422
+        if reason == "meta":
+            return jsonify({"error": "meta_error",
+                            "message": info.get("detail") or "Couldn't read that link. Try a single-song URL."}), 400
         return jsonify({"error": "resolve_failed",
-                        "message": "Couldn't get a direct link — try again, or use the standard download."}), 502
+                        "message": "Couldn't find a matching track — try again, or use the desktop app."}), 502
 
     maxd = lim.get("max_duration", 0)
     if maxd and info.get("duration") and info["duration"] > maxd:
