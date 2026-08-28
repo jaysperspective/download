@@ -7328,6 +7328,8 @@ def _resolve_direct(youtube_url: str, want_itag: str, clients, timeout: int = 60
             info = json.loads(r.stdout)
         except Exception:
             continue
+        if not isinstance(info, dict):   # a client can return `null` — skip it
+            continue
         fmt = next((f for f in (info.get("formats") or [])
                     if str(f.get("format_id")) == want_itag and f.get("url")), None)
         if not fmt:
