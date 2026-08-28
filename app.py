@@ -6753,25 +6753,26 @@ WEB_HTML = r"""<!doctype html>
     </div>
 
     <div class="ios hide" id="iosBanner">
-      Saving on iPhone or iPad? Get <a href="__IOS_URL__">+media</a> — downloads drop straight into your library app and play offline. You can still save files here to the Files app.
+      Downloads open in the <a href="__IOS_URL__">+media</a> app and play offline, right on your phone.
     </div>
 
-    <div class="card">
+    <div class="card" id="dlCard">
       <h2>Download</h2>
       <label>Paste a link</label>
       <input id="url" type="url" inputmode="url" autocapitalize="off" placeholder="YouTube, SoundCloud, Spotify, Apple Music…">
-      <label>Format</label>
-      <select id="type">
-        <option value="audio">Audio (MP3)</option>
-        <option value="video">Video (MP4)</option>
-      </select>
       <button id="dlBtn">Download</button>
       <div class="status hide" id="status"></div>
       <div class="bar hide" id="barWrap"><i id="bar"></i></div>
       <div class="msg" id="dlMsg"></div>
     </div>
 
-    <div class="card">
+    <div class="card hide" id="desktopCard">
+      <h2>Best on your phone</h2>
+      <p class="muted" style="font-size:15px; margin:0;">This web app downloads straight to your iPhone or iPad. On a computer, get the full <b style="color:var(--tx)">+downloads</b> app &mdash; a one-time <b style="color:var(--pink)">$1.99</b>, with video and faster downloads.</p>
+      <a href="/" style="text-decoration:none;"><button style="margin-top:14px;">Get the desktop app &rarr;</button></a>
+    </div>
+
+    <div class="card" id="libCard">
       <h2>Your library</h2>
       <div class="lib" id="lib"></div>
       <p class="muted hide" id="libEmpty" style="font-size:14px;">Nothing saved yet. Your downloads show up here.</p>
@@ -6806,8 +6807,15 @@ function setMsg(el, text, kind){ el.textContent = text || ''; el.className = 'ms
 
 async function checkMe(){
   var r = await api('/web/me');
-  if (r.ok){ renderUser(r.data); show($('app')); hide($('auth')); loadLibrary(); }
+  if (r.ok){ renderUser(r.data); show($('app')); hide($('auth')); setupPlatform(); loadLibrary(); }
   else { show($('auth')); hide($('app')); }
+}
+
+// The web app downloads client-direct into +media, which is iPhone/iPad only.
+// On a computer there's no cheap path, so send them to the paid desktop app.
+function setupPlatform(){
+  if (isIOS){ show($('dlCard')); show($('libCard')); hide($('desktopCard')); }
+  else { hide($('dlCard')); hide($('libCard')); show($('desktopCard')); }
 }
 
 function renderUser(u){
@@ -6817,14 +6825,6 @@ function renderUser(u){
   $('quota').textContent = u.tier === 'pro'
     ? 'Priority downloads • ' + u.used_today + ' today'
     : left + ' of ' + u.daily_limit + ' downloads left today';
-  if (typeof u.allow_video !== 'undefined'){
-    var vopt = document.querySelector('#type option[value="video"]');
-    if (vopt){
-      vopt.disabled = !u.allow_video;
-      vopt.textContent = u.allow_video ? 'Video (MP4)' : 'Video (MP4) — Pro';
-      if (!u.allow_video && $('type').value === 'video') $('type').value = 'audio';
-    }
-  }
   if (isIOS) show($('iosBanner'));
 }
 
@@ -6870,11 +6870,8 @@ $('logoutBtn').onclick = async function(){
 $('dlBtn').onclick = function(){
   var url = $('url').value.trim();
   if (!url){ setMsg($('dlMsg'), 'Paste a link first.', 'err'); return; }
-  var type = $('type').value;
-  // Audio on iPhone/iPad opens straight in +media (client-direct). Video has no
-  // progressive stream to hand off, so it takes the standard server-side download.
-  if (isIOS && type === 'audio'){ mobileHandoff(url, 'audio'); }
-  else { desktopDownload(url, type); }
+  // Web is audio-only, iPhone/iPad only — the download opens in +media.
+  mobileHandoff(url, 'audio');
 };
 
 // iPhone/iPad: resolve, then open the download in the +media app. If +media
@@ -7165,8 +7162,14 @@ def web_library_delete(item_id):
 
 @app.post("/web/start")
 def web_start():
-    """Auth-gated enqueue for the /web app. Enforces the daily cap, stamps the
-    job with the user's tier caps + priority, and shares run_job()/dispatcher."""
+    """DISABLED: server-side downloads pull the full file through the residential
+    proxy, so they're turned off on the web. Audio goes client-direct via
+    /web/api/resolve → +media; video and desktop use the paid desktop app.
+    (Body kept for when a cost-effective server-side path exists.)"""
+    return jsonify({
+        "error": "web_download_disabled",
+        "message": "Downloads on the web are audio-only and open in the +media app. For video or on a computer, get the +downloads desktop app.",
+    }), 403
     user = _current_web_user(request)
     if not user:
         return jsonify({"error": "Please sign in to download."}), 401
