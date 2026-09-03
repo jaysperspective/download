@@ -2579,6 +2579,20 @@ HTML = r"""
     }
     .reviews-cta:hover { text-decoration: underline; }
     @media (max-width: 720px) { .reviews-grid { grid-template-columns: 1fr; } }
+    /* Download social-proof counter (under reviews) */
+    .dl-proof {
+      display: flex; align-items: baseline; justify-content: center; gap: 12px;
+      flex-wrap: wrap; margin: -40px 0 64px; text-align: center;
+    }
+    .dl-proof-num {
+      font-size: 40px; font-weight: 900; line-height: 1;
+      color: #db52a6; letter-spacing: -0.01em;
+    }
+    .dl-proof-label {
+      font-size: 15px; font-weight: 600; color: #8a828a;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    @media (max-width: 720px) { .dl-proof { margin-top: -24px; } .dl-proof-num { font-size: 34px; } }
     .trial-cta { margin-top: 16px; }
     .btn-trial {
       display: inline-flex; align-items: center; gap: 10px;
@@ -3105,6 +3119,13 @@ HTML = r"""
           <div class="reviews-grid">{{ reviews_html|safe }}</div>
           <a class="reviews-cta" href="/review">★ Leave a review</a>
         </div>
+      </div>
+      {% endif %}
+
+      {% if total_downloads %}
+      <div class="dl-proof">
+        <span class="dl-proof-num">{{ total_downloads }}+</span>
+        <span class="dl-proof-label">downloads and counting</span>
       </div>
       {% endif %}
 
@@ -5480,6 +5501,14 @@ def run_job(job_id: str):
                 pass
         append_history(record)
 
+# Social-proof download counter shown under the landing-page reviews. This is the
+# combined trial-edition downloads + paid desktop purchases, rounded DOWN to a clean
+# marketing figure — bump it at each release. Sources (see stats-pulling guide):
+#   paid desktop = payment app sovereign.db (access_tokens, customer_email set)
+#   trial        = Kit tag desktop-trial (id 19708265)
+# 2026-09-03 actuals: 281 paid + 2,314 trial = 2,595  ->  2,500+
+TOTAL_DOWNLOADS = 2500
+
 @app.get("/")
 def index():
     agg = review_aggregate()
@@ -5491,6 +5520,7 @@ def index():
         avg_rating=avg,
         avg_stars=("★" * filled + "☆" * (5 - filled)),
         reviews_html=_render_reviews_html(approved_reviews(limit=24)),
+        total_downloads="{:,}".format(TOTAL_DOWNLOADS),
     )
 
 # ── SEO: robots + sitemap ────────────────────────────────────────────
