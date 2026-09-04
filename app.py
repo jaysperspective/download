@@ -4006,7 +4006,7 @@ _LEGAL_LAST_UPDATED = "May 21, 2026"
 # 2026 (the trial app stays running on port 5055, full app silently delegates
 # to it). v3.0.1 of the desktop app fixes this automatically, but anyone on a
 # pre-3.0.1 trial still has to close it once by hand.
-_TROUBLESHOOTING_LAST_UPDATED = "June 7, 2026"
+_TROUBLESHOOTING_LAST_UPDATED = "September 4, 2026"
 _TROUBLESHOOTING_BODY = """
 <div class="callout">
   <strong>Quick fix:</strong> if you bought the full version but your browser still shows the trial, the trial app is still running in the background. Closing it fully (instructions below) lets the full app take over. The latest +downloads (v3.0.1, June 2026) handles this automatically — these steps are for older installs.
@@ -4064,6 +4064,35 @@ _TROUBLESHOOTING_BODY = """
   <li><strong>Deny</strong> &mdash; also fine. Public YouTube videos will still work. Downloads that need a Chrome login (SoundCloud Go+, YouTube age-gated, etc.) may fail.</li>
 </ul>
 <p>Nothing is uploaded, exfiltrated, or sent off your machine. The cookies are used locally on disk for that download and that's it. +downloads is a fully local app &mdash; the only network traffic it makes is to the sites you're downloading from.</p>
+
+<h2>The app opens then immediately closes</h2>
+<p>You double-click +downloads, it bounces once in the Dock or taskbar, and then it disappears &mdash; no window, no error, no crash report. This almost always means an <strong>earlier copy of +downloads is still stuck running in the background</strong>, holding the connection the new one needs. Each time you open the app it hands off to the stuck copy and quietly closes.</p>
+<div class="callout"><strong>The permanent fix:</strong> update to the latest +downloads (<strong>v4.3.1 or newer</strong>) &mdash; it clears the stuck copy automatically on launch. Grab it free at <a href="/desktop/update">digitaldownloads.space/desktop/update</a>. You only need the steps below to open the app <em>this</em> time so you can update.</p>
+
+<h3>Easiest fix (any computer)</h3>
+<p>Fully <strong>restart your computer</strong>, then open +downloads. Restarting clears the stuck copy, and the app will launch normally.</p>
+
+<h3>Mac &mdash; free it without restarting everything</h3>
+<ol>
+  <li>Press <strong>Command + Space</strong>, type <strong>Terminal</strong>, and press Return.</li>
+  <li>Paste this line and press Return:<br><code>lsof -ti tcp:5055 -sTCP:LISTEN | xargs kill</code></li>
+  <li>Open <strong>+downloads</strong> again &mdash; it should launch straight into your browser.</li>
+</ol>
+
+<h3>Windows &mdash; free it without restarting</h3>
+<ol>
+  <li>Press <strong>Ctrl + Shift + Esc</strong> to open <strong>Task Manager</strong> (click <strong>More details</strong> if it's small).</li>
+  <li>In the <strong>Processes</strong> tab, find any <strong>+downloads</strong> entry, click it, and click <strong>End task</strong>. Do this for every +downloads row you see.</li>
+  <li>Launch your <strong>+downloads</strong> shortcut again.</li>
+</ol>
+
+<h3>Linux &mdash; free it without restarting</h3>
+<ol>
+  <li>Open a Terminal window.</li>
+  <li>Type this and press Enter:<br><code>pkill -f '+downloads'</code></li>
+  <li>Launch your <strong>+downloads</strong> AppImage again.</li>
+</ol>
+<p>Once it opens, head to <a href="/desktop/update">the update page</a> and install the latest version so this doesn't happen again.</p>
 
 <h2>Still stuck?</h2>
 <p>Email <a href="mailto:digitalsov2026@gmail.com?subject=+downloads%20help">digitalsov2026@gmail.com</a> with a short description of the problem and a screenshot if you can. We answer every email and we're glad to help.</p>
