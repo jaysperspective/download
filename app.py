@@ -84,6 +84,14 @@ def _init_launch_db():
             "created_at INTEGER NOT NULL)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_launch_created ON launch_events(created_at)")
+        # Permanent per-UTC-day rollup of launch_events (day = midnight-UTC epoch).
+        # launch_events is the source of truth; this survives even if that table
+        # is ever pruned, and feeds the all-time DAU trend chart on /admin.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS launch_daily ("
+            "day INTEGER PRIMARY KEY, count INTEGER NOT NULL, "
+            "full_count INTEGER NOT NULL DEFAULT 0, trial_count INTEGER NOT NULL DEFAULT 0)"
+        )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ios_scan_events ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -283,14 +291,51 @@ def _record_ios_scan(source: str, ua: str):
     except Exception:
         pass
 
+def _rollup_launch_daily():
+    """Upsert completed UTC days from launch_events into launch_daily. Lazy —
+    called from the admin stats pull, so no cron is needed. Idempotent: resumes
+    from MAX(day) and never touches today (still accumulating). Zero-launch days
+    are stored as explicit zeros so the trend chart shows gaps honestly."""
+    try:
+        with _analytics_lock, _analytics_conn() as conn:
+            today_start = int(time.time()) // 86400 * 86400
+            last = conn.execute("SELECT MAX(day) FROM launch_daily").fetchone()[0]
+            if last is not None:
+                start = int(last) + 86400
+            else:
+                first = conn.execute("SELECT MIN(created_at) FROM launch_events").fetchone()[0]
+                if first is None:
+                    return
+                start = int(first) // 86400 * 86400
+            if start >= today_start:
+                return
+            rows = conn.execute(
+                "SELECT created_at - (created_at % 86400) AS d, COUNT(*), "
+                "SUM(CASE WHEN edition='full' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN edition='trial' THEN 1 ELSE 0 END) "
+                "FROM launch_events WHERE created_at >= ? AND created_at < ? GROUP BY d",
+                (start, today_start),
+            ).fetchall()
+            counts = {int(d): (n, f or 0, t or 0) for d, n, f, t in rows}
+            day = start
+            while day < today_start:
+                n, f, t = counts.get(day, (0, 0, 0))
+                conn.execute(
+                    "INSERT OR REPLACE INTO launch_daily (day, count, full_count, trial_count) "
+                    "VALUES (?, ?, ?, ?)", (day, n, f, t))
+                day += 86400
+    except Exception:
+        pass
+
 def _launch_analytics() -> dict:
     """Active-install stats from launch pings. DAU = pings in the last 24h — a good
     active-install proxy since the client throttles to one ping per install per 24h.
     The 7d/30d numbers are launch *counts* (an install pings ~once/day), so they're
     labelled 'launches', not deduped installs (the ping carries no device id by design)."""
+    _rollup_launch_daily()
     now = int(time.time())
     out = {"dau": 0, "l7": 0, "l30": 0, "total": 0, "first": None,
-           "by_version": [], "by_os": [], "by_edition": [], "daily": []}
+           "by_version": [], "by_os": [], "by_edition": [], "daily": [], "trend": []}
     try:
         conn = _analytics_conn()
         try:
@@ -319,6 +364,23 @@ def _launch_analytics() -> dict:
             for i in range(29, -1, -1):
                 d = today_start - i * 86400
                 out["daily"].append({"date": time.strftime("%Y-%m-%d", time.gmtime(d)), "count": dc.get(d, 0)})
+            # All-time DAU trend: completed days from the launch_daily rollup,
+            # plus today's still-accumulating count flagged as partial.
+            out["trend"] = [
+                {"date": time.strftime("%Y-%m-%d", time.gmtime(day)),
+                 "count": n, "full": f, "trial": t}
+                for day, n, f, t in cur.execute(
+                    "SELECT day, count, full_count, trial_count FROM launch_daily ORDER BY day"
+                ).fetchall()
+            ]
+            trow = cur.execute(
+                "SELECT COUNT(*), SUM(CASE WHEN edition='full' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN edition='trial' THEN 1 ELSE 0 END) "
+                "FROM launch_events WHERE created_at >= ?", (today_start,)).fetchone()
+            out["trend"].append({
+                "date": time.strftime("%Y-%m-%d", time.gmtime(today_start)),
+                "count": trow[0] or 0, "full": trow[1] or 0, "trial": trow[2] or 0,
+                "partial": True})
         finally:
             conn.close()
     except Exception:
@@ -1479,6 +1541,10 @@ ADMIN_HTML = """
         <div class="card-title">Daily Launches &middot; Last 30 Days</div>
         <div class="chart" id="li-chart"></div>
       </div>
+      <div class="card">
+        <div class="card-title">DAU Trend &middot; All Time<span id="li-trend-sub" style="color:#777;font-weight:400;font-size:12px"></span></div>
+        <div id="li-trend"></div>
+      </div>
       <div class="pv-row">
         <div class="card">
           <div class="card-title">By Version &middot; Last 30 Days</div>
@@ -1777,6 +1843,66 @@ ADMIN_HTML = """
 
       document.getElementById('li-versions').innerHTML = barList(li.by_version);
       document.getElementById('li-os').innerHTML = barList(li.by_os);
+      renderDauTrend(li.trend || []);
+    }
+
+    function trendAvg(arr) {
+      if (!arr.length) return 0;
+      var s = 0;
+      arr.forEach(function (d) { s += d.count; });
+      return s / arr.length;
+    }
+
+    function renderDauTrend(t) {
+      var el = document.getElementById('li-trend');
+      var sub = document.getElementById('li-trend-sub');
+      if (t.length < 2) {
+        el.innerHTML = '<span style="color:#555;font-size:13px">Not enough history yet</span>';
+        return;
+      }
+      var max = 1;
+      t.forEach(function (d) { if (d.count > max) max = d.count; });
+      var W = 640, H = 150, n = t.length;
+      function x(i) { return (i / (n - 1)) * W; }
+      function y(c) { return H - 6 - (c / max) * (H - 16); }
+      var line = t.map(function (d, i) { return x(i).toFixed(1) + ',' + y(d.count).toFixed(1); }).join(' ');
+      var avgLine = t.map(function (d, i) {
+        var s = 0, k = 0;
+        for (var j = Math.max(0, i - 6); j <= i; j++) { s += t[j].count; k++; }
+        return x(i).toFixed(1) + ',' + y(s / k).toFixed(1);
+      }).join(' ');
+      var bandW = W / (n - 1);
+      var hovers = t.map(function (d, i) {
+        var tip = d.date + ': ' + d.count
+          + ' (' + (d.full || 0) + ' full / ' + (d.trial || 0) + ' trial)'
+          + (d.partial ? ' - today so far' : '');
+        return '<rect x="' + (x(i) - bandW / 2).toFixed(1) + '" y="0" width="' + bandW.toFixed(1)
+          + '" height="' + H + '" fill="transparent"><title>' + tip + '</title></rect>';
+      }).join('');
+      var grid = [0.25, 0.5, 0.75, 1].map(function (f) {
+        var gy = y(max * f).toFixed(1);
+        return '<line x1="0" y1="' + gy + '" x2="' + W + '" y2="' + gy
+          + '" stroke="#2e2c2c" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+      }).join('');
+      el.innerHTML =
+        '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="width:100%;height:150px;display:block">'
+        + grid
+        + '<polyline points="' + line + '" fill="none" stroke="#db52a6" stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
+        + '<polyline points="' + avgLine + '" fill="none" stroke="#bf9b3a" stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>'
+        + hovers
+        + '</svg>'
+        + '<div style="display:flex;justify-content:space-between;color:#777;font-size:11px;margin-top:4px">'
+        + '<span>' + t[0].date + '</span>'
+        + '<span><span style="color:#db52a6">&#9644;</span> daily &nbsp;<span style="color:#bf9b3a">&#9644;</span> 7d avg &nbsp;peak ' + max + '</span>'
+        + '<span>' + t[n - 1].date + '</span></div>';
+      var done = t.filter(function (d) { return !d.partial; });
+      var a7 = trendAvg(done.slice(-7)), p7 = trendAvg(done.slice(-14, -7));
+      var txt = ' &middot; 7d avg ' + a7.toFixed(1);
+      if (p7 > 0) {
+        var delta = Math.round(((a7 - p7) / p7) * 100);
+        txt += ' (' + (delta >= 0 ? '+' : '') + delta + '% vs prior wk)';
+      }
+      sub.innerHTML = done.length ? txt : '';
     }
 
     function renderPageviews(pv) {
