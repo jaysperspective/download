@@ -84,6 +84,13 @@ def _init_launch_db():
             "created_at INTEGER NOT NULL)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_launch_created ON launch_events(created_at)")
+        # Anonymous per-install id (random UUID minted by the desktop app) — lets
+        # 7d/30d be counted as DISTINCT installs instead of raw launch counts.
+        # Only builds shipped after 2026-09 send it; older rows stay NULL.
+        try:
+            conn.execute("ALTER TABLE launch_events ADD COLUMN install_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # Permanent per-UTC-day rollup of launch_events (day = midnight-UTC epoch).
         # launch_events is the source of truth; this survives even if that table
         # is ever pruned, and feeds the all-time DAU trend chart on /admin.
@@ -270,13 +277,14 @@ def _pageview_analytics() -> dict:
         pass
     return out
 
-def _record_launch(app_name: str, version: str, os_str: str, edition: str, ua: str):
+def _record_launch(app_name: str, version: str, os_str: str, edition: str, ua: str,
+                   install_id: str = ""):
     try:
         with _analytics_lock, _analytics_conn() as conn:
             conn.execute(
-                "INSERT INTO launch_events (app, version, os, edition, ua, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (app_name, version, os_str, edition, ua, int(time.time())),
+                "INSERT INTO launch_events (app, version, os, edition, ua, created_at, install_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (app_name, version, os_str, edition, ua, int(time.time()), install_id or None),
             )
     except Exception:
         pass
@@ -344,6 +352,12 @@ def _launch_analytics() -> dict:
             out["dau"] = c("SELECT COUNT(*) FROM launch_events WHERE created_at >= ?", now - 86400)
             out["l7"] = c("SELECT COUNT(*) FROM launch_events WHERE created_at >= ?", now - 7 * 86400)
             out["l30"] = c("SELECT COUNT(*) FROM launch_events WHERE created_at >= ?", now - 30 * 86400)
+            # True unique installs (WAU/MAU) — only pings carrying an install_id,
+            # i.e. builds shipped after 2026-09. Under-counts until those roll out.
+            out["uniq7"] = c("SELECT COUNT(DISTINCT install_id) FROM launch_events "
+                             "WHERE install_id IS NOT NULL AND created_at >= ?", now - 7 * 86400)
+            out["uniq30"] = c("SELECT COUNT(DISTINCT install_id) FROM launch_events "
+                              "WHERE install_id IS NOT NULL AND created_at >= ?", now - 30 * 86400)
             out["total"] = c("SELECT COUNT(*) FROM launch_events")
             out["first"] = c("SELECT MIN(created_at) FROM launch_events")
             month = now - 30 * 86400
@@ -1828,7 +1842,9 @@ ADMIN_HTML = """
           pvCard('Active Today', li.dau, 'c-green', 'installs pinged in 24h')
         + pvCard('Launches - 7d', li.l7, 'c-blue', 'app opens, last 7 days')
         + pvCard('Launches - 30d', li.l30, 'c-amber', 'app opens, last 30 days')
-        + pvCard('Total Pings', li.total, 'c-pink', 'since tracking restored');
+        + pvCard('Total Pings', li.total, 'c-pink', 'since tracking restored')
+        + (li.uniq30 ? pvCard('Unique WAU', li.uniq7, 'c-blue', 'distinct installs, 7d (id-reporting builds only)')
+                     + pvCard('Unique MAU', li.uniq30, 'c-amber', 'distinct installs, 30d (id-reporting builds only)') : '');
 
       var daily = li.daily || [];
       var dmax = 1;
@@ -6500,16 +6516,19 @@ def _cors(resp):
 
 @app.route("/api/ping", methods=["POST", "OPTIONS"])
 def api_ping():
-    """Anonymous desktop launch ping: {app, version, os, edition}. No PII."""
+    """Anonymous desktop launch ping: {app, version, os, edition, install_id}. No PII —
+    install_id is a random per-install UUID for unique-install counting."""
     if request.method == "OPTIONS":
         return _cors(make_response("", 204))
     d = request.get_json(force=True, silent=True) or {}
+    iid = "".join(c for c in str(d.get("install_id") or "")[:64] if c.isalnum() or c == "-")
     _record_launch(
         str(d.get("app") or "")[:64],
         str(d.get("version") or "")[:32],
         str(d.get("os") or "")[:64],
         str(d.get("edition") or "full")[:16],
         (request.headers.get("User-Agent") or "")[:200],
+        iid,
     )
     return _cors(jsonify({"ok": True}))
 
