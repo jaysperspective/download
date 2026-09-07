@@ -343,7 +343,8 @@ def _launch_analytics() -> dict:
     _rollup_launch_daily()
     now = int(time.time())
     out = {"dau": 0, "l7": 0, "l30": 0, "total": 0, "first": None,
-           "by_version": [], "by_os": [], "by_edition": [], "daily": [], "trend": []}
+           "by_version": [], "by_os": [], "by_edition": [], "daily": [], "trend": [],
+           "retention": {"installs": 0, "weekly": [], "curve": []}}
     try:
         conn = _analytics_conn()
         try:
@@ -395,6 +396,34 @@ def _launch_analytics() -> dict:
                 "date": time.strftime("%Y-%m-%d", time.gmtime(today_start)),
                 "count": trow[0] or 0, "full": trow[1] or 0, "trial": trow[2] or 0,
                 "partial": True})
+            # Retention cohorts from install ids. Empty until id-reporting builds
+            # (2026-09+) roll out. Caveat: an EXISTING install's id first appears
+            # when it updates, so early weeks overstate "new" — self-corrects as
+            # the id-reporting base becomes the norm.
+            wk = 7 * 86400
+            this_week = now - (now % wk)
+            weeks_by_id = {}
+            for iid, w in cur.execute(
+                    "SELECT DISTINCT install_id, created_at - (created_at % ?) "
+                    "FROM launch_events WHERE install_id IS NOT NULL", (wk,)):
+                weeks_by_id.setdefault(iid, set()).add(int(w))
+            firsts = {iid: min(ws) for iid, ws in weeks_by_id.items()}
+            weekly = []
+            for i in range(11, -1, -1):
+                w = this_week - i * wk
+                new = sum(1 for f in firsts.values() if f == w)
+                ret = sum(1 for iid, ws in weeks_by_id.items() if w in ws and firsts[iid] < w)
+                weekly.append({"week": time.strftime("%Y-%m-%d", time.gmtime(w)),
+                               "new": new, "returning": ret})
+            curve = []
+            for off in range(1, 7):
+                elig = [iid for iid, f in firsts.items() if f + off * wk < this_week]
+                if not elig:
+                    continue
+                kept = sum(1 for iid in elig if firsts[iid] + off * wk in weeks_by_id[iid])
+                curve.append({"week": off, "pct": round(100.0 * kept / len(elig), 1),
+                              "n": len(elig)})
+            out["retention"] = {"installs": len(weeks_by_id), "weekly": weekly, "curve": curve}
         finally:
             conn.close()
     except Exception:
@@ -1561,6 +1590,16 @@ ADMIN_HTML = """
       </div>
       <div class="pv-row">
         <div class="card">
+          <div class="card-title">Weekly Installs &middot; New vs Returning <span style="color:#777;font-weight:400;font-size:11px">(id-reporting builds; early weeks overstate "new")</span></div>
+          <div id="li-ret-weekly"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Retention &middot; % active in week N after first seen</div>
+          <div id="li-ret-curve"></div>
+        </div>
+      </div>
+      <div class="pv-row">
+        <div class="card">
           <div class="card-title">By Version &middot; Last 30 Days</div>
           <div id="li-versions"></div>
         </div>
@@ -1860,6 +1899,36 @@ ADMIN_HTML = """
       document.getElementById('li-versions').innerHTML = barList(li.by_version);
       document.getElementById('li-os').innerHTML = barList(li.by_os);
       renderDauTrend(li.trend || []);
+      renderRetention(li.retention || {installs: 0, weekly: [], curve: []});
+    }
+
+    function renderRetention(r) {
+      var wEl = document.getElementById('li-ret-weekly');
+      var cEl = document.getElementById('li-ret-curve');
+      if (!r.installs) {
+        var wait = '<span style="color:#555;font-size:13px">Waiting for id-reporting installs &mdash; ships with the next desktop release.</span>';
+        wEl.innerHTML = wait; cEl.innerHTML = wait;
+        return;
+      }
+      var weeks = (r.weekly || []).filter(function (w) { return w.new + w.returning > 0; });
+      var wmax = 1;
+      weeks.forEach(function (w) { if (w.new + w.returning > wmax) wmax = w.new + w.returning; });
+      wEl.innerHTML = weeks.length ? weeks.map(function (w) {
+        var nw = Math.round((w.new / wmax) * 100), rw = Math.round((w.returning / wmax) * 100);
+        return '<div class="bar-row"><div class="bar-head">'
+          + '<span class="bp">' + w.week.slice(5) + '</span>'
+          + '<span class="bc"><span style="color:#db52a6">' + w.new + ' new</span> &middot; <span style="color:#48c78e">' + w.returning + ' ret</span></span></div>'
+          + '<div class="bar-track"><div style="display:flex;height:100%">'
+          + '<div style="width:' + nw + '%;background:#db52a6;border-radius:3px 0 0 3px"></div>'
+          + '<div style="width:' + rw + '%;background:#48c78e;border-radius:0 3px 3px 0"></div>'
+          + '</div></div></div>';
+      }).join('') : '<span style="color:#555;font-size:13px">No activity yet</span>';
+      cEl.innerHTML = (r.curve || []).length ? r.curve.map(function (p) {
+        return '<div class="bar-row"><div class="bar-head">'
+          + '<span class="bp">Week ' + p.week + '</span>'
+          + '<span class="bc">' + p.pct + '% <span style="color:#666">of ' + p.n + '</span></span></div>'
+          + '<div class="bar-track"><div class="bar-fill" style="width:' + Math.round(p.pct) + '%"></div></div></div>';
+      }).join('') : '<span style="color:#555;font-size:13px">Needs at least one full week of id data</span>';
     }
 
     function trendAvg(arr) {
