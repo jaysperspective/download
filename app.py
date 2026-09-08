@@ -5747,7 +5747,8 @@ def run_job(job_id: str):
 #   paid desktop = payment app sovereign.db (access_tokens, customer_email set)
 #   trial        = Kit tag desktop-trial (id 19708265)
 # 2026-09-03 actuals: 281 paid + 2,314 trial = 2,595  ->  2,500+
-TOTAL_DOWNLOADS = 2500
+# 2026-09-08 (v4.3.2 cut): 2,381 trial + >=281 paid = >=2,662  ->  2,600+
+TOTAL_DOWNLOADS = 2600
 
 @app.get("/")
 def index():
