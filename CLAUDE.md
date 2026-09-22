@@ -1,6 +1,6 @@
 # +downloads — codebase notes for Claude
 
-A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $1.99 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live. A free, feature-limited **trial edition** is offered at `/trial` behind an email gate (live since 2026-05-21).
+A Flask-based media downloader hosted at **digitaldownloads.space**. Wraps `yt-dlp` + `ffmpeg` behind a web UI, queues jobs, and gates access via a token-based payment system. A companion **desktop app** is sold at $3.99 one-time through the same payment system — buy, redeem, OS-aware installer download, and free updates are all live. A free, feature-limited **trial edition** is offered at `/trial` behind an email gate (live since 2026-05-21).
 
 ## Project shape
 
@@ -40,7 +40,7 @@ If new HTML contains JS string-literal `\n` or regex escapes (`\.`, `\[`), keep 
 ## Two products, one payment app
 
 - **Online tool** (`/`): metered, token = N download credits. Two SKUs ($1/3-downloads, $5/10-downloads), both → `https://joshuaisaiah.art/payment/access`. **The free web service is permanently paused** — the online tool now requires a purchased token (paste it into the inline Insert-Token entry). **Currently also hard-paused for token holders** (see *Hard pause + Decodo dependency* section below) — the two `.token-buy` cards on the landing page are grayed out and click-intercepted to a desktop-app explainer modal (`showOnlineOfflineModal`), and `/start` 503s every request including paid ones.
-- **Desktop app** ($1.99 one-time, free updates forever, macOS/Windows/Linux):
+- **Desktop app** ($3.99 one-time, free updates forever, macOS/Windows/Linux):
   - **Buy:** landing-page Buy buttons → `/desktop/buy` → 302 → `DESKTOP_PAYMENT_URL` (payment app's `?product=desktop` checkout).
   - **Redeem:** after Stripe checkout the buyer lands on `/desktop/redeem?token=…` → Mac/Windows/Linux download buttons (UA-detected default first) → `/desktop/redeem/download` consumes one of the token's 5 credits and serves the installer. **Pay-to-download model** — no in-app license check; installers are freely shareable.
   - **Free updates:** when a new version ships, installers are replaced on the server and a Kit broadcast goes to the **whole mailing list** linking to **`/desktop/update`** — a token-less page serving the latest installers. The 5 redeem credits are a re-download buffer for the purchased version; updates ride the `/desktop/update` channel.
@@ -62,7 +62,7 @@ Password-gated by `YT_UI_COOKIES_PASSWORD` (503 if unset). "Load Stats" (`POST /
 On-page SEO lives in the inline template heads plus a few small routes (added 2026-05-21):
 
 - **Meta tags:** the `HTML`, `_DESKTOP_TRIAL_HTML` and `_LEGAL_PAGE_TEMPLATE` heads carry `<meta description>`, canonical, Open Graph and Twitter Card tags. The legal template takes `canonical` + `meta_desc` as render vars passed from the `privacy()`/`terms()` routes. `_DESKTOP_REDEEM_HTML` is `noindex` — `/desktop/redeem` carries a token in the URL and `/desktop/update` is a utility page.
-- **Structured data:** the landing page embeds one JSON-LD `<script type="application/ld+json">` with an `@graph` of `WebSite`, `Organization`, `SoftwareApplication` (the $1.99 offer) and `FAQPage`. The `FAQPage` mirrors the on-page `<details>` FAQ — **keep the two in sync** if you edit either.
+- **Structured data:** the landing page embeds one JSON-LD `<script type="application/ld+json">` with an `@graph` of `WebSite`, `Organization`, `SoftwareApplication` (the $3.99 offer) and `FAQPage`. The `FAQPage` mirrors the on-page `<details>` FAQ — **keep the two in sync** if you edit either.
 - **Routes** (plain `Response` routes near `index()`): `/robots.txt`, `/sitemap.xml` (lists `/`, `/trial`, `/troubleshooting`, `/privacy`, `/terms`), and `/llms.txt` (an [llmstxt.org](https://llmstxt.org)-format brief for AI crawlers). `_SITE_ORIGIN` is the canonical origin used to build absolute URLs. `/google42d52abaf2591614.html` is the Google Search Console HTML-file token — kept as a backup only; the property is verified by DNS (a `digitaldownloads.space` **Domain** property), and the sitemap is submitted.
 - **Social image:** `static/og-image.svg` → `static/og-image.png` (1200×630 branded share card), regenerated via `sips -s format png` like the favicons.
 
