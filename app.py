@@ -2168,7 +2168,7 @@ HTML = r"""
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="+downloads">
-  <meta name="description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and more. Use it online or get the desktop app for unlimited downloads — $1.99 one-time, free updates forever. macOS, Windows and Linux.">
+  <meta name="description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and more. Use it online or get the desktop app for unlimited downloads — $3.99 one-time, free updates forever. macOS, Windows and Linux.">
   <link rel="manifest" href="/static/manifest.json">
   <title>+downloads — Save anything you can stream</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -2181,7 +2181,7 @@ HTML = r"""
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="+downloads">
   <meta property="og:title" content="+downloads — Save anything you can stream">
-  <meta property="og:description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more sites. Online tool or a $1.99 one-time desktop app — free updates forever, macOS, Windows and Linux.">
+  <meta property="og:description" content="Download any audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more sites. Online tool or a $3.99 one-time desktop app — free updates forever, macOS, Windows and Linux.">
   <meta property="og:url" content="https://digitaldownloads.space/">
   <meta property="og:image" content="https://digitaldownloads.space/static/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -2190,7 +2190,7 @@ HTML = r"""
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="+downloads — Save anything you can stream">
-  <meta name="twitter:description" content="Download audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more. $1.99 one-time desktop app, free updates forever.">
+  <meta name="twitter:description" content="Download audio or video from YouTube, Spotify, Apple Music, SoundCloud and 1000+ more. $3.99 one-time desktop app, free updates forever.">
   <meta name="twitter:image" content="https://digitaldownloads.space/static/og-image.png">
   <script type="application/ld+json">
   {
@@ -2223,7 +2223,7 @@ HTML = r"""
         "screenshot": "https://digitaldownloads.space/static/og-image.png",
         "offers": {
           "@type": "Offer",
-          "price": "1.99",
+          "price": "3.99",
           "priceCurrency": "USD",
           "url": "https://digitaldownloads.space/desktop/buy",
           "availability": "https://schema.org/InStock"
@@ -2242,7 +2242,7 @@ HTML = r"""
           {
             "@type": "Question",
             "name": "What's the difference between the online tool and the desktop app?",
-            "acceptedAnswer": { "@type": "Answer", "text": "The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $1.99 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server." }
+            "acceptedAnswer": { "@type": "Answer", "text": "The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $3.99 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server." }
           },
           {
             "@type": "Question",
@@ -3028,7 +3028,7 @@ HTML = r"""
       <a href="#faq">FAQ</a>
       <a href="/troubleshooting">Help</a>
       <a href="https://www.reddit.com/r/digitaldownloads_app/" target="_blank" rel="noopener noreferrer">Community</a>
-      <a class="pill" href="/desktop/buy">Buy Desktop · $1.99</a>
+      <a class="pill" href="/desktop/buy">Buy Desktop · $3.99</a>
     </nav>
   </header>
 
@@ -3042,7 +3042,7 @@ HTML = r"""
         <div>
           <a class="btn-buy large" href="/desktop/buy">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Buy +downloads — $1.99
+            Buy +downloads — $3.99
           </a>
         </div>
         <div class="trial-cta" style="text-align: center; margin: 14px auto 0;">
@@ -3205,8 +3205,8 @@ HTML = r"""
             </div>
             <div class="ov-inner" id="ovEnd" style="display:none;">
               <div class="ov-h">That&rsquo;s +downloads.</div>
-              <div class="ov-p">The whole app, yours for a one-time <b>$1.99</b>. No subscriptions, no limits.</div>
-              <a class="btn-buy" href="/desktop/buy" onclick="demoRef('demo-buy')">Get +downloads &mdash; $1.99</a>
+              <div class="ov-p">The whole app, yours for a one-time <b>$3.99</b>. No subscriptions, no limits.</div>
+              <a class="btn-buy" href="/desktop/buy" onclick="demoRef('demo-buy')">Get +downloads &mdash; $3.99</a>
               <a class="ov-alt" href="/trial" onclick="demoRef('demo-trial')">Or grab the free edition first</a>
               <button class="ov-dismiss" onclick="demoTourStart()">&#8635; Replay tour</button>
             </div>
@@ -3216,7 +3216,7 @@ HTML = r"""
         <div class="demo-cta-wrap">
           <p class="demo-cta-copy">The whole app &mdash; downloader, music &amp; video players, and your library &mdash; running on your own computer.</p>
           <div class="demo-ctas">
-            <a class="btn-buy" href="/desktop/buy" onclick="demoRef('demo-buy')">Get +downloads &mdash; $1.99</a>
+            <a class="btn-buy" href="/desktop/buy" onclick="demoRef('demo-buy')">Get +downloads &mdash; $3.99</a>
             <a class="demo-cta-alt" href="/trial" onclick="demoRef('demo-trial')">Or grab the free edition first</a>
           </div>
         </div>
@@ -3274,7 +3274,7 @@ HTML = r"""
             { find: function(){ return el('demoJob').closest('.demo-panel'); }, step: 'Step 2 of 5', title: 'It downloads here', body: 'Every download tracks live in the queue. Paste a whole list and each one lines up on its own.', enter: function(){ if (!started) window.demoStart(); } },
             { find: function(){ return el('demoMpT').closest('.demo-panel'); }, step: 'Step 3 of 5', title: 'Built-in music player', body: 'Finished songs load straight into the player — shuffle, repeat, and your own queue.' },
             { find: function(){ return document.querySelector('.demo-video').closest('.demo-panel'); }, step: 'Step 4 of 5', title: 'Watch videos in-app', body: 'Downloaded videos play right inside +downloads — no other app needed.' },
-            { find: function(){ return document.querySelector('.demo-libtabs').closest('.demo-panel'); }, step: 'Step 5 of 5', title: 'Your whole library', body: 'Everything organizes into albums, songs and videos — offline and yours forever. One-time $1.99.' }
+            { find: function(){ return document.querySelector('.demo-libtabs').closest('.demo-panel'); }, step: 'Step 5 of 5', title: 'Your whole library', body: 'Everything organizes into albums, songs and videos — offline and yours forever. One-time $3.99.' }
           ];
           var tourIdx = -1;
           function clearSpots(){ var ps = document.querySelectorAll('.demo-panel'); for (var k = 0; k < ps.length; k++) ps[k].classList.remove('tour-spot'); }
@@ -3442,7 +3442,7 @@ HTML = r"""
         <h2 class="faq-title">Common questions</h2>
         <details>
           <summary>What's the difference between the online tool and the desktop app?</summary>
-          <div class="faq-body">The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $1.99 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server.</div>
+          <div class="faq-body">The online tool is metered — each token gives you a few downloads, billed instantly. The desktop app is unlimited: one $3.99 purchase, every download you want, forever. Plus it runs locally, so files never pass through our server.</div>
         </details>
         <details>
           <summary>Are updates really free forever?</summary>
@@ -3485,7 +3485,7 @@ HTML = r"""
         <p>Stop fighting with free-trial walls and per-download tokens.</p>
         <a class="btn-buy large" href="/desktop/buy">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Get +downloads — $1.99
+          Get +downloads — $3.99
         </a>
       </div>
     </div>
@@ -3500,7 +3500,7 @@ HTML = r"""
 
       <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:28px;">
         <a href="/web" style="display:inline-flex; align-items:center; gap:8px; padding:14px 30px; background:#db52a6; color:#fff; font-size:15px; font-weight:700; border-radius:10px; text-decoration:none;">Open the web app &rarr;</a>
-        <a href="/desktop/buy" style="display:inline-flex; align-items:center; gap:8px; padding:14px 30px; background:transparent; border:1px solid #2e2c2c; color:#f0eef0; font-size:15px; font-weight:700; border-radius:10px; text-decoration:none;">Get the desktop app &middot; $1.99</a>
+        <a href="/desktop/buy" style="display:inline-flex; align-items:center; gap:8px; padding:14px 30px; background:transparent; border:1px solid #2e2c2c; color:#f0eef0; font-size:15px; font-weight:700; border-radius:10px; text-decoration:none;">Get the desktop app &middot; $3.99</a>
       </div>
     </div>
   </section>
@@ -5815,13 +5815,13 @@ def sitemap_xml():
 # LLMs cite +downloads correctly instead of guessing.
 _LLMS_TXT = """# +downloads
 
-> +downloads is a media downloader for YouTube, Spotify, Apple Music, SoundCloud and ~1000 other sites. It is available as a metered token-based online tool and as a $1.99 one-time desktop app for macOS, Windows and Linux, with free updates forever.
+> +downloads is a media downloader for YouTube, Spotify, Apple Music, SoundCloud and ~1000 other sites. It is available as a metered token-based online tool and as a $3.99 one-time desktop app for macOS, Windows and Linux, with free updates forever.
 
 +downloads wraps yt-dlp and ffmpeg behind a simple interface. The desktop app runs entirely on the user's machine, so files never pass through a server. A free, feature-limited (YouTube-only) trial edition of the desktop app is also offered. The product is hosted at https://digitaldownloads.space.
 
 ## Products
 
-- [Desktop app](https://digitaldownloads.space/desktop/buy): $1.99 one-time purchase, free updates forever, for macOS, Windows and Linux. Unlimited downloads, runs locally.
+- [Desktop app](https://digitaldownloads.space/desktop/buy): $3.99 one-time purchase, free updates forever, for macOS, Windows and Linux. Unlimited downloads, runs locally.
 - [Online tool](https://digitaldownloads.space/): Browser-based downloader, metered with token-based download credits.
 - [Free trial edition](https://digitaldownloads.space/trial): A no-cost, YouTube-only edition of the desktop app. No payment or card required.
 
@@ -5835,7 +5835,7 @@ _LLMS_TXT = """# +downloads
 ## Key facts
 
 - Supported sites include YouTube, Spotify, Apple Music, SoundCloud, Vimeo, Twitter/X, Facebook, TikTok, Twitch, Bandcamp, Mixcloud, Dailymotion and roughly 1000 more.
-- The desktop app costs $1.99 as a one-time purchase. There are no subscriptions and no upgrade fees; all future versions are free.
+- The desktop app costs $3.99 as a one-time purchase. There are no subscriptions and no upgrade fees; all future versions are free.
 - The desktop app has no in-app license check — payment gates obtaining the installer, not running it.
 - The desktop app downloads media locally; URLs, files and activity are never seen by the +downloads server.
 - An iOS companion app, "+ Media Player", plays a synced +downloads library and pairs with the desktop app over Wi-Fi.
@@ -6057,7 +6057,7 @@ _REVIEW_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leave a review &middot; +downloads</title>
 <meta name="robots" content="index,follow">
-<meta name="description" content="Share your experience with +downloads — the $1.99 one-time media downloader for macOS, Windows and Linux.">
+<meta name="description" content="Share your experience with +downloads — the $3.99 one-time media downloader for macOS, Windows and Linux.">
 <link rel="canonical" href="https://digitaldownloads.space/review">
 <link rel="icon" href="/static/favicon.svg">
 <style>
@@ -6939,7 +6939,7 @@ WEB_HTML = r"""<!doctype html>
 
     <div class="card hide" id="desktopCard">
       <h2>Best on your phone</h2>
-      <p class="muted" style="font-size:15px; margin:0;">This web app downloads straight to your iPhone or iPad. On a computer, get the full <b style="color:var(--tx)">+downloads</b> app &mdash; a one-time <b style="color:var(--pink)">$1.99</b>, with video and faster downloads.</p>
+      <p class="muted" style="font-size:15px; margin:0;">This web app downloads straight to your iPhone or iPad. On a computer, get the full <b style="color:var(--tx)">+downloads</b> app &mdash; a one-time <b style="color:var(--pink)">$3.99</b>, with video and faster downloads.</p>
       <a href="/" style="text-decoration:none;"><button style="margin-top:14px;">Get the desktop app &rarr;</button></a>
     </div>
 
