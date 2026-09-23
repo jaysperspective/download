@@ -1181,9 +1181,33 @@ _COOKIE_ERROR_PATTERNS = [
 ]
 
 
+def _send_admin_email(subject: str, text: str) -> bool:
+    """Send an admin alert to ALERT_EMAIL over Resend (HTTPS; SMTP is DO-blocked).
+    Sets a User-Agent header — api.resend.com is behind Cloudflare, which 403s the
+    default Python-urllib UA ("error code: 1010"). No-op if unconfigured."""
+    if not RESEND_API_KEY or not ALERT_EMAIL:
+        return False
+    try:
+        payload = json.dumps({
+            "from": WEB_MAIL_FROM,
+            "to": [ALERT_EMAIL],
+            "subject": subject,
+            "text": text,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.resend.com/emails", data=payload,
+            headers={"Authorization": "Bearer " + RESEND_API_KEY, "Content-Type": "application/json",
+                     "User-Agent": "downloads-web/1.0"},
+        )
+        urllib.request.urlopen(req, timeout=8).read()
+        return True
+    except Exception:
+        return False
+
+
 def _check_cookie_alert(log_output: str):
     global _last_cookie_alert
-    if not SMTP_USER or not SMTP_PASS or not ALERT_EMAIL:
+    if not RESEND_API_KEY or not ALERT_EMAIL:
         return
     if not any(pattern in log_output for pattern in _COOKIE_ERROR_PATTERNS):
         return
@@ -1191,49 +1215,33 @@ def _check_cookie_alert(log_output: str):
         if time.time() - _last_cookie_alert < 86400:
             return
         _last_cookie_alert = time.time()
-    try:
-        msg = MIMEText(
-            "+downloads: YouTube cookies have expired or are invalid.\n\n"
-            "Downloads that rely on YouTube (including Spotify/Apple Music) will fail "
-            "until you upload fresh cookies.\n\n"
-            "To fix:\n"
-            "1. Open Chrome, go to youtube.com (make sure you're logged in)\n"
-            "2. Use the 'Get cookies.txt LOCALLY' extension to export cookies\n"
-            "3. Upload at https://digitaldownloads.space/admin\n\n"
-            f"Error detected:\n{log_output[-500:]}"
-        )
-        msg["Subject"] = "[+downloads] YouTube cookies expired — action needed"
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(SMTP_USER, SMTP_PASS)
-            smtp.send_message(msg)
-    except Exception:
-        pass
+    _send_admin_email(
+        "[+downloads] YouTube cookies expired — action needed",
+        "+downloads: YouTube cookies have expired or are invalid.\n\n"
+        "Downloads that rely on YouTube (including Spotify/Apple Music) will fail "
+        "until you upload fresh cookies.\n\n"
+        "To fix:\n"
+        "1. Open Chrome, go to youtube.com (make sure you're logged in)\n"
+        "2. Use the 'Get cookies.txt LOCALLY' extension to export cookies\n"
+        "3. Upload at https://digitaldownloads.space/admin\n\n"
+        f"Error detected:\n{log_output[-500:]}"
+    )
 
 
 def _send_review_alert(rating, name, body):
     """Email a heads-up when a new review needs moderation, so the admin doesn't
-    have to poll /admin. Reuses the cookie-alert SMTP config; no-ops if unset.
+    have to poll /admin. Sends via Resend (SMTP is DO-blocked); no-ops if unset.
     Fired on a background thread so it never slows the form submit."""
-    if not SMTP_USER or not SMTP_PASS or not ALERT_EMAIL:
+    if not RESEND_API_KEY or not ALERT_EMAIL:
         return
-    try:
-        msg = MIMEText(
-            "A new +downloads review is awaiting approval.\n\n"
-            f"Rating: {rating}/5\n"
-            f"Name:   {name or 'Anonymous'}\n"
-            f"Review: {(body or '(no text)')[:1000]}\n\n"
-            "Approve or hide it at https://digitaldownloads.space/admin (Reviews section)."
-        )
-        msg["Subject"] = f"[+downloads] New review ({rating}★) awaiting approval"
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(SMTP_USER, SMTP_PASS)
-            smtp.send_message(msg)
-    except Exception:
-        pass
+    _send_admin_email(
+        f"[+downloads] New review ({rating}★) awaiting approval",
+        "A new +downloads review is awaiting approval.\n\n"
+        f"Rating: {rating}/5\n"
+        f"Name:   {name or 'Anonymous'}\n"
+        f"Review: {(body or '(no text)')[:1000]}\n\n"
+        "Approve or hide it at https://digitaldownloads.space/admin (Reviews section)."
+    )
 
 
 def _is_safe_path(path: str) -> bool:
