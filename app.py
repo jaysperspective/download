@@ -1161,7 +1161,10 @@ def _send_login_email(email: str, link: str) -> bool:
         }).encode()
         req = urllib.request.Request(
             "https://api.resend.com/emails", data=body,
-            headers={"Authorization": "Bearer " + RESEND_API_KEY, "Content-Type": "application/json"},
+            headers={"Authorization": "Bearer " + RESEND_API_KEY, "Content-Type": "application/json",
+                     # api.resend.com is behind Cloudflare, which bot-blocks the default
+                     # Python-urllib UA (403 "error code: 1010"). A non-default UA passes.
+                     "User-Agent": "downloads-web/1.0"},
         )
         urllib.request.urlopen(req, timeout=8).read()
         return True
