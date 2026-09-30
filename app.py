@@ -7485,9 +7485,56 @@ def web_start():
     })
 
 
+# Web beta deactivated 2026-09-30 (low activation: 46 signups, ~20% ever completed
+# a download). /web now serves an "unavailable" notice and sends visitors to the
+# desktop app. WEB_HTML and the /web/* API routes are left in place so the beta can
+# be turned back on by restoring the original one-line body below.
+_WEB_UNAVAILABLE_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>+downloads &bull; web</title>
+<meta name="robots" content="noindex">
+<meta http-equiv="refresh" content="6; url=/">
+<link rel="icon" href="/static/favicon.svg">
+<style>
+  :root{ --bg:#1a1818; --card:#242222; --bd:#2e2c2c; --tx:#f0eef0; --pink:#db52a6; --pink2:#c9479a; --mut:#a49ea2; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--tx); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .wrap{ max-width:480px; margin:0 auto; padding:40px 16px 64px; }
+  header{ margin-bottom:28px; }
+  .logo{ font-weight:800; font-size:20px; text-decoration:none; color:var(--pink); letter-spacing:-.2px; }
+  .lo-prefix{ color:var(--tx); }
+  .card{ background:var(--card); border:1px solid var(--bd); border-radius:14px; padding:24px; text-align:center; }
+  h1{ font-size:22px; margin:0 0 10px; }
+  p{ color:var(--mut); font-size:15px; margin:0 0 18px; }
+  a.btn{ display:inline-block; background:var(--pink); color:#fff; border-radius:10px; padding:13px 22px; font-size:16px; font-weight:700; text-decoration:none; }
+  a.btn:hover{ background:var(--pink2); }
+  .note{ text-align:center; color:var(--mut); font-size:13px; margin-top:18px; }
+  .note a{ color:var(--mut); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="logo" href="/"><span class="lo-prefix">digital</span>+downloads</a>
+  </header>
+  <div class="card">
+    <h1>The web app is unavailable</h1>
+    <p>The +downloads web app is no longer available. For unlimited audio &amp; video downloads on macOS, Windows and Linux, get the desktop app &mdash; a one-time <b style="color:var(--pink)">$3.99</b>.</p>
+    <a class="btn" href="/">Get the desktop app &rarr;</a>
+  </div>
+  <p class="note">Taking you there now&hellip; or <a href="/">tap here</a>.</p>
+</div>
+</body>
+</html>
+"""
+
+
 @app.get("/web")
 def web_app():
-    return Response(WEB_HTML.replace("__IOS_URL__", IOS_APP_STORE_URL), mimetype="text/html")
+    return Response(_WEB_UNAVAILABLE_HTML, mimetype="text/html")
 
 
 def _dev_resolve_gv(vid: str):
