@@ -436,6 +436,17 @@ FILE_TTL_DAYS = float(os.environ.get("YT_UI_FILE_TTL_DAYS", "0"))  # 0 = disable
 VERSION = "1.3"
 COOKIES_PATH = os.environ.get("YT_UI_COOKIES") or ""
 COOKIES_PASSWORD = os.environ.get("YT_UI_COOKIES_PASSWORD") or ""
+
+
+def _admin_password_ok(supplied):
+    """Constant-time check of an admin-supplied password against COOKIES_PASSWORD.
+
+    hmac.compare_digest raises TypeError on non-ASCII str inputs, so compare the
+    UTF-8 bytes instead — a non-ASCII password must reject cleanly, not 500.
+    """
+    return hmac.compare_digest(
+        (supplied or "").encode("utf-8"), COOKIES_PASSWORD.encode("utf-8")
+    )
 MAX_QUEUE_DEPTH = int(os.environ.get("YT_UI_MAX_QUEUE", "10"))
 PER_IP_CONCURRENT = int(os.environ.get("YT_UI_PER_IP_CONCURRENT", "2"))
 PER_IP_HOURLY = int(os.environ.get("YT_UI_PER_IP_HOURLY", "20"))
@@ -6469,7 +6480,7 @@ def admin_page():
 def upload_cookies():
     if not COOKIES_PASSWORD:
         abort(503)
-    if not hmac.compare_digest(request.form.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(request.form.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     if not COOKIES_PATH:
         return jsonify({"error": "YT_UI_COOKIES not configured"}), 400
@@ -6484,7 +6495,7 @@ def upload_cookies():
 def admin_builds_upload():
     if not COOKIES_PASSWORD:
         abort(503)
-    if not hmac.compare_digest(request.form.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(request.form.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     os_key = request.form.get("os", "")
     if os_key not in _OS_ORDER:
@@ -6515,7 +6526,7 @@ def admin_builds_delete():
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
-    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(data.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     os_key = data.get("os", "")
     if os_key not in _OS_ORDER:
@@ -6538,7 +6549,7 @@ def admin_stats():
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
-    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(data.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     history = load_history()
     by_status: dict = {}
@@ -6693,7 +6704,7 @@ def admin_web_stats():
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
-    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(data.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     return jsonify(_web_app_stats())
 
@@ -6703,7 +6714,7 @@ def admin_clear_history():
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
-    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(data.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     with open(HISTORY_PATH, "w", encoding="utf-8") as f:
         json.dump([], f)
@@ -6743,7 +6754,7 @@ def admin_debug_job(job_id):
     if not COOKIES_PASSWORD:
         abort(503)
     pw = request.args.get("pw", "")
-    if not hmac.compare_digest(pw, COOKIES_PASSWORD):
+    if not _admin_password_ok(pw):
         return jsonify({"error": "Invalid password"}), 403
     if not re.fullmatch(r'[0-9a-f\-]{36}', job_id):
         abort(400)
@@ -6777,7 +6788,7 @@ def admin_pause():
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
-    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(data.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     new_val = bool(data.get("paused", True))
     with _pause_lock:
@@ -6794,7 +6805,7 @@ def admin_review_action(review_id, action):
     if not COOKIES_PASSWORD:
         abort(503)
     data = request.get_json(silent=True) or {}
-    if not hmac.compare_digest(data.get("password", ""), COOKIES_PASSWORD):
+    if not _admin_password_ok(data.get("password", "")):
         return jsonify({"error": "Invalid password"}), 403
     status = {"approve": "approved", "deny": "denied"}.get(action)
     if not status:
