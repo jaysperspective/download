@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
 from flask import Flask, request, jsonify, send_from_directory, send_file, render_template_string, abort, after_this_request, make_response, redirect, Response
 import sys
+import io
 import zipfile
 import base64
 import re
@@ -54,7 +55,7 @@ LOG_DIR.mkdir(exist_ok=True)
 # storage — so it stays compatible with the "no user-tracking" privacy policy.
 ANALYTICS_DB = _data_dir / "analytics.db"
 _analytics_lock = threading.Lock()
-_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/review", "/privacy", "/terms", "/troubleshooting"}
+_TRACKED_PAGES = {"/", "/desktop/buy", "/desktop/redeem", "/trial", "/review", "/privacy", "/terms", "/troubleshooting", "/extension"}
 PAGEVIEW_RETENTION_DAYS = 90
 
 def _analytics_conn():
@@ -463,6 +464,20 @@ PAYMENT_APP_URL = os.environ.get("PAYMENT_APP_URL", "http://localhost:4001")
 TOKEN_INTERNAL_SECRET = os.environ.get("TOKEN_INTERNAL_SECRET", "")
 ACCESS_PAYMENT_URL = os.environ.get("ACCESS_PAYMENT_URL", "http://localhost:4001/payment/access")
 DESKTOP_PAYMENT_URL = os.environ.get("DESKTOP_PAYMENT_URL", f"{ACCESS_PAYMENT_URL}?product=desktop")
+
+# Browser-extension store listings. Empty until the MV3 extension clears Chrome
+# Web Store / Firefox AMO review; while empty, the /extension page shows a
+# "coming soon — in review" state plus the manual (load-unpacked) install path.
+# Flip these to the live store URLs — via env or here — once published and the
+# page automatically swaps the badges for real install buttons. The desktop app
+# (v4.4.0+) links users here as digitaldownloads.space/extension?b=chrome|firefox.
+EXTENSION_CHROME_URL = os.environ.get("EXTENSION_CHROME_URL", "").strip()
+EXTENSION_FIREFOX_URL = os.environ.get("EXTENSION_FIREFOX_URL", "").strip()
+# The extension snapshot bundled for manual install. Mirror of
+# yt-local-ui/browser-extension/ — re-sync it (and bump this version to match the
+# desktop VERSION) whenever the extension changes; /extension/download zips it live.
+EXTENSION_DIR = Path(__file__).parent / "browser-extension"
+EXTENSION_VERSION = "4.4.0"
 DESKTOP_BUILDS_DIR = Path(os.environ.get("DESKTOP_BUILDS_DIR") or (_data_dir / "desktop-builds"))
 DESKTOP_BUILDS_DIR.mkdir(parents=True, exist_ok=True)
 # Free-trial edition installers live in their own folder — never mixed with the
@@ -5801,6 +5816,7 @@ def sitemap_xml():
     pages = [
         ("/", "1.0"),
         ("/trial", "0.8"),
+        ("/extension", "0.6"),
         ("/review", "0.6"),
         ("/troubleshooting", "0.5"),
         ("/privacy", "0.3"),
@@ -5897,6 +5913,132 @@ def troubleshooting():
         canonical="https://digitaldownloads.space/troubleshooting",
         meta_desc="Help with +downloads: switching from the free trial to the full version, the macOS keychain &ldquo;security&rdquo; prompt about Chrome Safe Storage, and other common questions. Plain-language steps for Mac, Windows and Linux.",
     )
+
+def _extension_install_card(name, store_url, highlighted):
+    """One browser's install block for /extension. Renders a real 'Add to …'
+    button once store_url is set, otherwise a 'coming soon — in review' badge
+    that points at the manual-install section below. `highlighted` rings the card
+    the user arrived at via the desktop app's ?b= link."""
+    ring = "border-color:#db52a6; box-shadow:0 0 0 1px #db52a6;" if highlighted else ""
+    if store_url:
+        action = (
+            f'<a href="{html.escape(store_url)}" target="_blank" rel="noopener" '
+            'style="display:inline-block; margin-top:10px; padding:10px 18px; background:#db52a6; '
+            'color:#fff; font-weight:700; font-size:13px; border-radius:9px; text-decoration:none;">'
+            f'Add to {html.escape(name)}</a>'
+        )
+    else:
+        action = (
+            '<div style="margin-top:10px; font-size:12px; color:#bf9b3a; font-weight:700; '
+            'text-transform:uppercase; letter-spacing:0.06em;">Coming soon &mdash; in store review</div>'
+            '<a href="#manual" style="display:inline-block; margin-top:8px; font-size:13px;">'
+            'Install it manually now &rarr;</a>'
+        )
+    return (
+        '<div style="flex:1; min-width:220px; background:#242222; border:1px solid #2e2c2c; '
+        f'border-radius:12px; padding:18px 20px; {ring}">'
+        f'<div style="font-size:15px; font-weight:700; color:#f0eef0;">{html.escape(name)}</div>'
+        f'{action}</div>'
+    )
+
+
+def _extension_page_body(selected_browser):
+    firefox_sel = selected_browser == "firefox"
+    # Chrome link from the app also covers Edge (both Chromium, same store build).
+    chrome_sel = selected_browser in ("chrome", "edge", "chromium")
+    cards = (
+        _extension_install_card("Chrome / Edge", EXTENSION_CHROME_URL, chrome_sel)
+        + _extension_install_card("Firefox", EXTENSION_FIREFOX_URL, firefox_sel)
+    )
+    live = bool(EXTENSION_CHROME_URL or EXTENSION_FIREFOX_URL)
+    intro_note = "" if live else (
+        '<div class="callout"><strong>Heads up:</strong> the extension is finishing '
+        'its Chrome Web Store and Firefox Add-ons review. Until it&rsquo;s live in the '
+        'stores you can install it by hand in about a minute &mdash; steps below.</div>'
+    )
+    return (
+        '<p>The <strong>+downloads browser extension</strong> adds a one-click '
+        '&ldquo;send this page to +downloads&rdquo; button (and a right-click menu) to your '
+        'browser, so you can grab the video or audio you&rsquo;re watching without copying '
+        'the URL into the app.</p>'
+        '<div class="callout">It talks <strong>only</strong> to the +downloads desktop app '
+        'running on your own machine (<code>127.0.0.1:5055</code>) &mdash; nothing is sent to '
+        'any server. Make sure the <strong>desktop app (v4.4.0 or newer) is open</strong> '
+        'before you use it. Don&rsquo;t have it yet? <a href="/desktop/buy">Get +downloads</a> '
+        'or <a href="/trial">try the free edition</a>.</div>'
+        + intro_note
+        + '<div style="display:flex; gap:14px; flex-wrap:wrap; margin:18px 0 8px;">'
+        + cards + '</div>'
+        '<h2 id="manual">Install it manually</h2>'
+        '<p>Download the extension, then load it into your browser. You only do this once.</p>'
+        '<p><a href="/extension/download" '
+        'style="display:inline-block; padding:11px 20px; background:#db52a6; color:#fff; '
+        'font-weight:700; font-size:14px; border-radius:9px; text-decoration:none;">'
+        'Download the extension (.zip)</a></p>'
+        '<h3>Chrome / Edge / Brave</h3>'
+        '<ol>'
+        '<li>Unzip the download. You&rsquo;ll get a <strong>downloads-extension</strong> folder.</li>'
+        '<li>Open <strong>chrome://extensions</strong> (or <strong>edge://extensions</strong>).</li>'
+        '<li>Turn on <strong>Developer mode</strong> (top-right toggle).</li>'
+        '<li>Click <strong>Load unpacked</strong> and pick the <strong>downloads-extension</strong> folder.</li>'
+        '</ol>'
+        '<h3>Firefox</h3>'
+        '<ol>'
+        '<li>Unzip the download.</li>'
+        '<li>Open <strong>about:debugging</strong> &rarr; <strong>This Firefox</strong>.</li>'
+        '<li>Click <strong>Load Temporary Add-on</strong> and pick the <strong>manifest.json</strong> '
+        'file inside the unzipped folder.</li>'
+        '</ol>'
+        '<div class="callout">On Firefox a temporary add-on is removed when you restart the '
+        'browser &mdash; that&rsquo;s a Firefox rule for unsigned extensions, and it goes away '
+        'once the signed version lands in the Add-ons store. The signed Chrome/Firefox store '
+        'builds are on the way; this page will switch to one-click install buttons when they&rsquo;re live.</div>'
+        '<h2>Pair it with the app</h2>'
+        '<p>The first time you use the extension, open the +downloads desktop app and let them '
+        'connect &mdash; the app shows a short setup panel, and the extension&rsquo;s '
+        '<strong>Pairing &amp; settings</strong> page has a <strong>Connect</strong> button. '
+        'After that, right-click any video or use the toolbar button to send it to the app.</p>'
+        '<p>Still stuck? See <a href="/troubleshooting">Troubleshooting</a>.</p>'
+    )
+
+
+@app.get("/extension")
+def extension():
+    # Destination for the desktop app's in-app "get the browser extension" links
+    # (digitaldownloads.space/extension?b=chrome|firefox). The extension isn't in
+    # the stores yet, so this is an install/landing page, not a redirect — once
+    # EXTENSION_*_URL are set it surfaces real store buttons automatically.
+    selected = (request.args.get("b", "") or "").strip().lower()
+    return render_template_string(
+        _LEGAL_PAGE_TEMPLATE,
+        page_title="Browser extension",
+        updated=f"Version {EXTENSION_VERSION}",
+        body=_extension_page_body(selected),
+        canonical="https://digitaldownloads.space/extension",
+        meta_desc="The +downloads browser extension: send the page you're watching to the +downloads desktop app in one click. Chrome, Edge and Firefox. Install guide and manual (load-unpacked) steps.",
+    )
+
+
+@app.get("/extension/download")
+def extension_download():
+    # Zip the bundled extension snapshot live so the download always matches
+    # what's committed. Everything nests under downloads-extension/ so unzip
+    # yields a single named folder to point "Load unpacked" at.
+    if not EXTENSION_DIR.is_dir():
+        abort(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(EXTENSION_DIR.rglob("*")):
+            if path.is_file():
+                zf.write(path, Path("downloads-extension") / path.relative_to(EXTENSION_DIR))
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"downloads-extension-{EXTENSION_VERSION}.zip",
+    )
+
 
 @app.get("/desktop/buy")
 def desktop_buy():
